@@ -6,6 +6,7 @@ import {
   normalizeModelCompat,
   OPENAI_COMPATIBLE_REPLAY_HOOKS,
 } from "openclaw/plugin-sdk/provider-model-shared";
+import { applyFireworksModelCompat } from "./compat.js";
 import { isFireworksKimiModelId } from "./model-id.js";
 import { applyFireworksConfig, FIREWORKS_DEFAULT_MODEL_REF } from "./onboard.js";
 import {
@@ -25,7 +26,7 @@ function resolveFireworksDynamicModel(ctx: ProviderResolveDynamicModelContext) {
     return undefined;
   }
 
-  return (
+  const resolved =
     cloneFirstTemplateModel({
       providerId: PROVIDER_ID,
       modelId,
@@ -47,8 +48,9 @@ function resolveFireworksDynamicModel(ctx: ProviderResolveDynamicModelContext) {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: FIREWORKS_DEFAULT_CONTEXT_WINDOW,
       maxTokens: FIREWORKS_DEFAULT_MAX_TOKENS || DEFAULT_CONTEXT_TOKENS,
-    })
-  );
+    });
+
+  return applyFireworksModelCompat(resolved);
 }
 
 export default defineSingleProviderPluginEntry({
@@ -80,6 +82,7 @@ export default defineSingleProviderPluginEntry({
     wrapStreamFn: wrapFireworksProviderStream,
     resolveThinkingProfile: ({ modelId }) => resolveFireworksThinkingProfile(modelId),
     resolveDynamicModel: (ctx) => resolveFireworksDynamicModel(ctx),
+    normalizeResolvedModel: ({ model }) => applyFireworksModelCompat(model),
     isModernModelRef: () => true,
   },
 });

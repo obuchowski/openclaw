@@ -4,7 +4,7 @@ title: "Fireworks"
 read_when:
   - You want to use Fireworks with OpenClaw
   - You need the Fireworks API key env var or default model id
-  - You are debugging Kimi thinking-off behavior on Fireworks
+  - You are debugging thinking control on Fireworks
 ---
 
 [Fireworks](https://fireworks.ai) exposes open-weight and routed models through an OpenAI-compatible API. OpenClaw includes a bundled Fireworks provider plugin that ships with two pre-cataloged Kimi models and accepts any Fireworks model or router id at runtime.
@@ -71,18 +71,18 @@ openclaw onboard --non-interactive \
 
 ## Built-in catalog
 
-| Model ref                                              | Name                        | Input        | Context | Max output | Thinking             |
-| ------------------------------------------------------ | --------------------------- | ------------ | ------- | ---------- | -------------------- |
-| `fireworks/accounts/fireworks/models/kimi-k2p6`        | Kimi K2.6                   | text + image | 262,144 | 262,144    | Forced off           |
-| `fireworks/accounts/fireworks/routers/kimi-k2p5-turbo` | Kimi K2.5 Turbo (Fire Pass) | text + image | 256,000 | 256,000    | Forced off (default) |
+| Model ref                                              | Name                        | Input        | Context | Max output | Thinking       |
+| ------------------------------------------------------ | --------------------------- | ------------ | ------- | ---------- | -------------- |
+| `fireworks/accounts/fireworks/models/kimi-k2p6`        | Kimi K2.6                   | text + image | 262,144 | 262,144    | Off by default |
+| `fireworks/accounts/fireworks/routers/kimi-k2p5-turbo` | Kimi K2.5 Turbo (Fire Pass) | text + image | 256,000 | 256,000    | Off by default |
 
 <Note>
-  OpenClaw pins all Fireworks Kimi models to `thinking: off` because Fireworks rejects Kimi thinking parameters in production. Routing the same model through [Moonshot](/providers/moonshot) directly preserves Kimi reasoning output. See [thinking modes](/tools/thinking) for switching between providers.
+  Fireworks exposes thinking controls through provider-specific request fields. OpenClaw sends `thinking.type` for Fireworks Kimi models and `reasoning_effort` for supported Fireworks reasoning families such as DeepSeek V4, GPT-OSS 120B, MiniMax M2, and GLM. See [thinking modes](/tools/thinking) for switching levels.
 </Note>
 
 ## Custom Fireworks model ids
 
-OpenClaw accepts any Fireworks model or router id at runtime. Use the exact id shown by Fireworks and prefix it with `fireworks/`. Dynamic resolution clones the Fire Pass template (text + image input, OpenAI-compatible API, default cost zero) and disables thinking automatically when the id matches the Kimi pattern.
+OpenClaw accepts any Fireworks model or router id at runtime. Use the exact id shown by Fireworks and prefix it with `fireworks/`. Dynamic resolution clones the Fire Pass template (text + image input, OpenAI-compatible API, default cost zero) and applies Fireworks thinking controls when the id matches a supported reasoning family.
 
 ```json5
 {
@@ -107,10 +107,10 @@ OpenClaw accepts any Fireworks model or router id at runtime. Use the exact id s
 
   </Accordion>
 
-  <Accordion title="Why thinking is forced off for Kimi">
-    Fireworks K2.6 returns a 400 if the request carries `reasoning_*` parameters even though Kimi supports thinking through Moonshot's own API. The bundled policy (`extensions/fireworks/thinking-policy.ts`) advertises only the `off` thinking level for Kimi model ids, so manual `/think` switches and provider-policy surfaces stay aligned with the runtime contract.
+  <Accordion title="How thinking controls map on Fireworks">
+    Fireworks Kimi models use the Fireworks `thinking` object. OpenClaw maps Kimi `off` to `thinking: { "type": "disabled" }` and the Kimi on level to `thinking: { "type": "enabled" }`.
 
-    To use Kimi reasoning end-to-end, configure the [Moonshot provider](/providers/moonshot) and route the same model through it.
+    Fireworks DeepSeek V4 and GLM models use `reasoning_effort`; OpenClaw maps `/think off` to `reasoning_effort: "none"` for those families. Fireworks GPT-OSS 120B does not accept `none`, so its lowest level is `minimal`. Fireworks MiniMax M2 exposes only `low`, `medium`, and `high`, so OpenClaw does not advertise an off level for MiniMax M2.
 
   </Accordion>
 

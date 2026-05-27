@@ -13,12 +13,18 @@ function isFireworksProviderId(providerId: string): boolean {
 export function createFireworksKimiThinkingDisabledWrapper(
   baseStreamFn: StreamFn | undefined,
 ): StreamFn {
+  return createFireworksKimiThinkingWrapper(baseStreamFn, "off");
+}
+
+export function createFireworksKimiThinkingWrapper(
+  baseStreamFn: StreamFn | undefined,
+  thinkingLevel: ProviderWrapStreamFnContext["thinkingLevel"],
+): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) =>
     streamWithPayloadPatch(underlying, model, context, options, (payloadObj) => {
-      // Fireworks Kimi can emit chain-of-thought in visible `content` unless
-      // the Anthropic-style thinking toggle is explicitly disabled.
-      payloadObj.thinking = { type: "disabled" };
+      const thinkingType = !thinkingLevel || thinkingLevel === "off" ? "disabled" : "enabled";
+      payloadObj.thinking = { type: thinkingType };
       delete payloadObj.reasoning;
       delete payloadObj.reasoning_effort;
       delete payloadObj.reasoningEffort;
@@ -30,10 +36,10 @@ export function wrapFireworksProviderStream(
 ): StreamFn | undefined {
   if (
     !isFireworksProviderId(ctx.provider) ||
-    ctx.model?.api !== "openai-completions" ||
+    (ctx.model && ctx.model.api !== "openai-completions") ||
     !isFireworksKimiModelId(ctx.modelId)
   ) {
     return undefined;
   }
-  return createFireworksKimiThinkingDisabledWrapper(ctx.streamFn);
+  return createFireworksKimiThinkingWrapper(ctx.streamFn, ctx.thinkingLevel);
 }

@@ -3,6 +3,7 @@ import type { Context, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   createFireworksKimiThinkingDisabledWrapper,
+  createFireworksKimiThinkingWrapper,
   wrapFireworksProviderStream,
 } from "./stream.js";
 
@@ -10,6 +11,7 @@ function capturePayload(params: {
   provider: string;
   api: string;
   modelId: string;
+  thinkingLevel?: "off" | "low" | "medium" | "high" | "xhigh" | "max";
   initialPayload?: Record<string, unknown>;
 }): Record<string, unknown> {
   let captured: Record<string, unknown> = {};
@@ -20,7 +22,10 @@ function capturePayload(params: {
     return {} as ReturnType<StreamFn>;
   };
 
-  const wrapped = createFireworksKimiThinkingDisabledWrapper(baseStreamFn);
+  const wrapped =
+    params.thinkingLevel === undefined
+      ? createFireworksKimiThinkingDisabledWrapper(baseStreamFn)
+      : createFireworksKimiThinkingWrapper(baseStreamFn, params.thinkingLevel);
   void wrapped(
     {
       api: params.api,
@@ -99,6 +104,22 @@ describe("createFireworksKimiThinkingDisabledWrapper", () => {
     expect(k2p6Payload).toEqual({ thinking: { type: "disabled" } });
   });
 
+  it("enables Fireworks Kimi thinking when the Kimi on level is selected", () => {
+    expect(
+      capturePayload({
+        provider: "fireworks",
+        api: "openai-completions",
+        modelId: "accounts/fireworks/models/kimi-k2p6",
+        thinkingLevel: "low",
+        initialPayload: {
+          reasoning_effort: "low",
+          reasoning: { effort: "low" },
+          reasoningEffort: "low",
+        },
+      }),
+    ).toEqual({ thinking: { type: "enabled" } });
+  });
+
   it("passes sanitized payloads to caller onPayload hooks", () => {
     let callbackPayload: Record<string, unknown> = {};
     const baseStreamFn: StreamFn = (_model, _context, options) => {
@@ -164,6 +185,14 @@ describe("createFireworksKimiThinkingDisabledWrapper", () => {
           provider: "fireworks-ai",
           id: "accounts/fireworks/routers/kimi-k2p5-turbo",
         } as Model<"openai-completions">,
+        streamFn: undefined,
+      } as never),
+    ).toBeTypeOf("function");
+
+    expect(
+      wrapFireworksProviderStream({
+        provider: "fireworks",
+        modelId: "accounts/fireworks/models/kimi-k2p6",
         streamFn: undefined,
       } as never),
     ).toBeTypeOf("function");
