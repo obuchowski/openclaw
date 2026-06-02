@@ -59,6 +59,15 @@ describe("chat.send error broadcast", () => {
         runId: "test-run-1",
         state: "error",
         errorMessage: expect.stringContaining("LLM timeout"),
+        message: expect.objectContaining({
+          role: "assistant",
+          content: [
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining("LLM timeout"),
+            }),
+          ],
+        }),
       }),
     );
   });

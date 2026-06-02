@@ -414,22 +414,53 @@ function buildApiAttachments(attachments?: ChatAttachment[]) {
     : undefined;
 }
 
-async function requestChatSend(
+export type ChatSendAckStatus = "started" | "in_flight" | "ok";
+
+export type ChatSendAck = {
+  runId: string;
+  status: ChatSendAckStatus;
+};
+
+function normalizeChatSendAck(payload: unknown, fallbackRunId: string): ChatSendAck {
+  if (!payload || typeof payload !== "object") {
+    return { runId: fallbackRunId, status: "started" };
+  }
+  const record = payload as Record<string, unknown>;
+  const runId =
+    typeof record.runId === "string" && record.runId.trim() ? record.runId.trim() : fallbackRunId;
+  const status = record.status;
+  return {
+    runId,
+    status: status === "in_flight" || status === "ok" ? status : "started",
+  };
+}
+
+export async function requestChatSend(
   state: ChatState,
-  params: { message: string; attachments?: ChatAttachment[]; runId: string },
-) {
+  params: {
+    message: string;
+    attachments?: ChatAttachment[];
+    runId: string;
+    sessionKey?: string;
+  },
+): Promise<ChatSendAck> {
+  const sessionKey = params.sessionKey ?? state.sessionKey;
+  const currentSessionId = state.currentSessionId;
   const sessionId =
-    typeof state.currentSessionId === "string" && state.currentSessionId.trim()
-      ? state.currentSessionId.trim()
+    sessionKey === state.sessionKey &&
+    typeof currentSessionId === "string" &&
+    currentSessionId.trim()
+      ? currentSessionId.trim()
       : undefined;
-  await state.client!.request("chat.send", {
-    sessionKey: state.sessionKey,
+  const payload = await state.client!.request("chat.send", {
+    sessionKey,
     ...(sessionId ? { sessionId } : {}),
     message: params.message,
     deliver: false,
     idempotencyKey: params.runId,
     attachments: buildApiAttachments(params.attachments),
   });
+  return normalizeChatSendAck(payload, params.runId);
 }
 
 type AssistantMessageNormalizationOptions = {
@@ -481,6 +512,27 @@ function normalizeFinalAssistantMessage(message: unknown): Record<string, unknow
   });
 }
 
+function buildErrorAssistantMessage(payload: ChatEventPayload): Record<string, unknown> | null {
+  const normalized = normalizeFinalAssistantMessage(payload.message);
+  if (normalized && !shouldHideAssistantChatMessage(normalized)) {
+    return normalized;
+  }
+  const error = payload.errorMessage?.trim();
+  if (!error) {
+    return null;
+  }
+  return {
+    role: "assistant",
+    content: [
+      {
+        type: "text",
+        text: error.startsWith("⚠️") || error.startsWith("Error:") ? error : `Error: ${error}`,
+      },
+    ],
+    timestamp: Date.now(),
+  };
+}
+
 export async function sendChatMessage(
   state: ChatState,
   message: string,
@@ -499,8 +551,61 @@ export async function sendChatMessage(
   }
 
   const now = Date.now();
+  appendUserChatMessage(state, msg, attachments, now);
 
-  // Build user message content blocks
+  state.chatSending = true;
+  state.lastError = null;
+  reconcileChatRunLifecycle(state as unknown as Parameters<typeof reconcileChatRunLifecycle>[0], {
+    clearRunStatus: true,
+  });
+  const runId = generateUUID();
+  state.chatRunId = runId;
+  state.chatStream = "";
+  state.chatStreamStartedAt = now;
+
+  try {
+    const ack = await requestChatSend(state, { message: msg, attachments, runId });
+    if (ack.status === "ok") {
+      state.chatRunId = null;
+      state.chatStream = null;
+      state.chatStreamStartedAt = null;
+    } else {
+      state.chatRunId = ack.runId;
+    }
+    return ack.status === "ok" ? ack.runId : runId;
+  } catch (err) {
+    const error = formatConnectError(err);
+    reconcileChatRunLifecycle(state as unknown as Parameters<typeof reconcileChatRunLifecycle>[0], {
+      outcome: "interrupted",
+      sessionStatus: "failed",
+      runId,
+      sessionKey: state.sessionKey,
+      clearLocalRun: true,
+      clearChatStream: true,
+    });
+    state.lastError = error;
+    state.chatMessages = [
+      ...state.chatMessages,
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Error: " + error }],
+        timestamp: Date.now(),
+      },
+    ];
+    return null;
+  } finally {
+    state.chatSending = false;
+  }
+}
+
+export function appendUserChatMessage(
+  state: ChatState,
+  message: string,
+  attachments?: ChatAttachment[],
+  timestamp = Date.now(),
+) {
+  const msg = message.trim();
+  const hasAttachments = attachments && attachments.length > 0;
   const contentBlocks: Array<{
     type: string;
     text?: string;
@@ -516,7 +621,6 @@ export async function sendChatMessage(
   if (msg) {
     contentBlocks.push({ type: "text", text: msg });
   }
-  // Add image previews to the message for display
   if (hasAttachments) {
     for (const att of attachments) {
       const previewUrl = getChatAttachmentPreviewUrl(att);
@@ -546,51 +650,37 @@ export async function sendChatMessage(
       });
     }
   }
-
   state.chatMessages = [
     ...state.chatMessages,
     {
       role: "user",
       content: contentBlocks,
-      timestamp: now,
+      timestamp,
     },
   ];
+}
 
-  state.chatSending = true;
-  state.lastError = null;
-  reconcileChatRunLifecycle(state as unknown as Parameters<typeof reconcileChatRunLifecycle>[0], {
-    clearRunStatus: true,
-  });
-  const runId = generateUUID();
-  state.chatRunId = runId;
-  state.chatStream = "";
-  state.chatStreamStartedAt = now;
-
-  try {
-    await requestChatSend(state, { message: msg, attachments, runId });
-    return runId;
-  } catch (err) {
-    const error = formatConnectError(err);
-    reconcileChatRunLifecycle(state as unknown as Parameters<typeof reconcileChatRunLifecycle>[0], {
-      outcome: "interrupted",
-      sessionStatus: "failed",
-      runId,
-      sessionKey: state.sessionKey,
-      clearLocalRun: true,
-      clearChatStream: true,
-    });
-    state.lastError = error;
-    state.chatMessages = [
-      ...state.chatMessages,
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "Error: " + error }],
-        timestamp: Date.now(),
-      },
-    ];
+async function sendChatMessageWithGeneratedRunId(
+  state: ChatState,
+  message: string,
+  attachments?: ChatAttachment[],
+): Promise<string | null> {
+  if (!state.client || !state.connected) {
     return null;
-  } finally {
-    state.chatSending = false;
+  }
+  const msg = message.trim();
+  const hasAttachments = attachments && attachments.length > 0;
+  if (!msg && !hasAttachments) {
+    return null;
+  }
+  state.lastError = null;
+  const runId = generateUUID();
+  try {
+    const ack = await requestChatSend(state, { message: msg, attachments, runId });
+    return ack.runId;
+  } catch (err) {
+    state.lastError = formatConnectError(err);
+    return null;
   }
 }
 
@@ -599,23 +689,7 @@ export async function sendDetachedChatMessage(
   message: string,
   attachments?: ChatAttachment[],
 ): Promise<string | null> {
-  if (!state.client || !state.connected) {
-    return null;
-  }
-  const msg = message.trim();
-  const hasAttachments = attachments && attachments.length > 0;
-  if (!msg && !hasAttachments) {
-    return null;
-  }
-  state.lastError = null;
-  const runId = generateUUID();
-  try {
-    await requestChatSend(state, { message: msg, attachments, runId });
-    return runId;
-  } catch (err) {
-    state.lastError = formatConnectError(err);
-    return null;
-  }
+  return sendChatMessageWithGeneratedRunId(state, message, attachments);
 }
 
 export async function sendSteerChatMessage(
@@ -623,23 +697,7 @@ export async function sendSteerChatMessage(
   message: string,
   attachments?: ChatAttachment[],
 ): Promise<string | null> {
-  if (!state.client || !state.connected) {
-    return null;
-  }
-  const msg = message.trim();
-  const hasAttachments = attachments && attachments.length > 0;
-  if (!msg && !hasAttachments) {
-    return null;
-  }
-  state.lastError = null;
-  const runId = generateUUID();
-  try {
-    await requestChatSend(state, { message: msg, attachments, runId });
-    return runId;
-  } catch (err) {
-    state.lastError = formatConnectError(err);
-    return null;
-  }
+  return sendChatMessageWithGeneratedRunId(state, message, attachments);
 }
 
 export async function abortChatRun(state: ChatState): Promise<boolean> {
@@ -663,6 +721,7 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
   if (!payload) {
     return null;
   }
+  const hadActiveRunBeforeEvent = state.chatRunId !== null;
   const sessionMatches = areUiSessionKeysEquivalent(payload.sessionKey, state.sessionKey);
   const activeRunMatches =
     state.chatRunId !== null &&
@@ -757,6 +816,10 @@ export function handleChatEvent(state: ChatState, payload?: ChatEventPayload) {
     }
     reconcileTerminalRun("interrupted", "killed");
   } else if (payload.state === "error") {
+    const errorMessage = hadActiveRunBeforeEvent ? buildErrorAssistantMessage(payload) : null;
+    if (errorMessage) {
+      state.chatMessages = [...state.chatMessages, errorMessage];
+    }
     reconcileTerminalRun("interrupted", "failed");
     state.lastError = payload.errorMessage ?? "chat error";
   }

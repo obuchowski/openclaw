@@ -182,6 +182,7 @@ const makeContext = (): GatewayRequestContext =>
     agentDeltaSentAt: new Map(),
     bufferedAgentEvents: new Map(),
     chatAbortedRuns: new Map(),
+    clearChatRunState: vi.fn(),
     agentRunSeq: new Map(),
     broadcast: vi.fn(),
     nodeSendToSession: vi.fn(),
@@ -523,6 +524,86 @@ describe("gateway agent handler", () => {
     dateOnlyFakeClockActive = false;
     vi.useRealTimers();
     resetExecApprovalFollowupRuntimeHandoffsForTests();
+  });
+
+  it("passes resolved maintenance config to the gateway admission store write", async () => {
+    primeMainAgentRun({
+      cfg: {
+        session: {
+          maintenance: {
+            mode: "enforce",
+            maxEntries: 42,
+          },
+        },
+      },
+    });
+
+    await runMainAgent("hi", "idem-maintenance-config");
+
+    const updateOptions = mocks.updateSessionStore.mock.calls.at(-1)?.[2];
+    expect(updateOptions).toMatchObject({
+      takeCacheOwnership: true,
+      maintenanceConfig: {
+        mode: "enforce",
+        maxEntries: 42,
+      },
+    });
+  });
+
+  it("uses single-entry persistence for ordinary gateway admission touches", async () => {
+    mockMainSessionEntry({});
+    let capturedOptions:
+      | {
+          resolveSingleEntryPersistence?: (result: unknown) => unknown;
+        }
+      | undefined;
+    let persistedResult: unknown;
+    mocks.updateSessionStore.mockImplementation(async (_path, updater, opts) => {
+      const store: Record<string, Record<string, unknown>> = {
+        "agent:main:main": buildExistingMainStoreEntry(),
+      };
+      persistedResult = await updater(store);
+      capturedOptions = opts;
+      return persistedResult;
+    });
+    mocks.agentCommand.mockResolvedValue({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 100 },
+    });
+
+    await runMainAgent("hi", "idem-single-entry-persist");
+
+    expect(capturedOptions?.resolveSingleEntryPersistence?.(persistedResult)).toMatchObject({
+      sessionKey: "agent:main:main",
+      entry: persistedResult,
+    });
+  });
+
+  it("disables single-entry persistence when admission prunes legacy store keys", async () => {
+    mockMainSessionEntry({});
+    let capturedOptions:
+      | {
+          resolveSingleEntryPersistence?: (result: unknown) => unknown;
+        }
+      | undefined;
+    let persistedResult: unknown;
+    mocks.updateSessionStore.mockImplementation(async (_path, updater, opts) => {
+      const store: Record<string, Record<string, unknown>> = {
+        "agent:main:main": buildExistingMainStoreEntry({ updatedAt: 100 }),
+        "Agent:main:main": buildExistingMainStoreEntry({ updatedAt: 50 }),
+      };
+      persistedResult = await updater(store);
+      capturedOptions = opts;
+      return persistedResult;
+    });
+    mocks.agentCommand.mockResolvedValue({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 100 },
+    });
+
+    await runMainAgent("hi", "idem-single-entry-legacy-prune");
+
+    expect(capturedOptions?.resolveSingleEntryPersistence?.(persistedResult)).toBeUndefined();
   });
 
   it("preserves ACP metadata from the current stored session entry", async () => {
@@ -967,6 +1048,72 @@ describe("gateway agent handler", () => {
     expectRecordFields(await waitForAgentCommandCall(), {
       acpTurnSource: "manual_spawn",
     });
+  });
+
+  it("does not bypass image support check for non-ACP sessions with acpTurnSource", async () => {
+    primeMainAgentRun();
+    mocks.agentCommand.mockClear();
+    const respond = vi.fn();
+
+    await invokeAgent(
+      {
+        message: "describe this image",
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        acpTurnSource: "manual_spawn",
+        idempotencyKey: "test-acp-image-bypass-guard",
+        attachments: [
+          {
+            type: "file",
+            mimeType: "image/png",
+            fileName: "test.png",
+            content: Buffer.from("fake-png-data").toString("base64"),
+          },
+        ],
+      },
+      { respond, reqId: "test-acp-image-bypass-guard" },
+    );
+
+    // Non-ACP session (agent:main:main) with acpTurnSource="manual_spawn" must
+    // NOT bypass resolveGatewayModelSupportsImages. The image should be rejected
+    // by the normal image-support check since this is not an ACP session.
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    const error = expectRespondError(respond, {});
+    expectStringFieldContains(error, "message", "does not accept image inputs");
+  });
+
+  it("does not bypass image support check for ACP-shaped sessions without ACP metadata", async () => {
+    mockMainSessionEntry({ sessionId: "existing-acp-shaped-session" });
+    mocks.updateSessionStore.mockResolvedValue(undefined);
+    mocks.agentCommand.mockResolvedValue({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 100 },
+    });
+    mocks.agentCommand.mockClear();
+    const respond = vi.fn();
+
+    await invokeAgent(
+      {
+        message: "describe this image",
+        agentId: "main",
+        sessionKey: "agent:main:acp:missing-meta",
+        acpTurnSource: "manual_spawn",
+        idempotencyKey: "test-acp-image-metadata-bypass-guard",
+        attachments: [
+          {
+            type: "file",
+            mimeType: "image/png",
+            fileName: "test.png",
+            content: Buffer.from("fake-png-data").toString("base64"),
+          },
+        ],
+      },
+      { respond, reqId: "test-acp-image-metadata-bypass-guard" },
+    );
+
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    const error = expectRespondError(respond, {});
+    expectStringFieldContains(error, "message", "does not accept image inputs");
   });
 
   it("rejects provider and model overrides for write-scoped callers", async () => {
@@ -2160,6 +2307,38 @@ describe("gateway agent handler", () => {
     );
     const spawnedCall = await waitForAgentCommandCall<{ workspaceDir?: string }>();
     expect(spawnedCall.workspaceDir).toBe("/tmp/inherited");
+  });
+
+  it("forwards spawnedCwd as runtime cwd for spawned sessions", async () => {
+    primeMainAgentRun();
+    mockMainSessionEntry({
+      spawnedBy: "agent:main:subagent:parent",
+      spawnedWorkspaceDir: "/tmp/inherited",
+      spawnedCwd: "/tmp/task-repo",
+    });
+    mocks.updateSessionStore.mockImplementation(async (_path, updater) => {
+      const store: Record<string, unknown> = {
+        "agent:main:main": buildExistingMainStoreEntry({
+          spawnedBy: "agent:main:subagent:parent",
+          spawnedWorkspaceDir: "/tmp/inherited",
+          spawnedCwd: "/tmp/task-repo",
+        }),
+      };
+      return await updater(store);
+    });
+    mocks.agentCommand.mockClear();
+
+    await invokeAgent(
+      {
+        message: "spawned run",
+        sessionKey: "agent:main:main",
+        idempotencyKey: "cwd-forwarded",
+      },
+      { reqId: "cwd-forwarded-1" },
+    );
+    const spawnedCall = await waitForAgentCommandCall<{ cwd?: string; workspaceDir?: string }>();
+    expect(spawnedCall.workspaceDir).toBe("/tmp/inherited");
+    expect(spawnedCall.cwd).toBe("/tmp/task-repo");
   });
 
   it("keeps origin messageChannel as webchat while delivery channel uses last session channel", async () => {

@@ -6,6 +6,8 @@ import {
   listRegisteredAgentHarnesses,
   restoreRegisteredAgentHarnesses,
 } from "../agents/harness/registry.js";
+import { resolveConfigEnvVars } from "../config/env-substitution.js";
+import { createConfigRuntimeEnv } from "../config/env-vars.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginInstallRecord } from "../config/types.plugins.js";
 import type { GatewayRequestHandler } from "../gateway/server-methods/types.js";
@@ -77,6 +79,7 @@ import {
   mergeSetupRuntimeChannelPlugin,
   resolveBundledRuntimeChannelRegistration,
   resolveSetupChannelRegistration,
+  shouldDeferConfiguredChannelFullRuntimeMerge,
   shouldLoadChannelPluginInSetupRuntime,
 } from "./loader-channel-setup.js";
 import {
@@ -181,6 +184,9 @@ export type PluginLoadOptions = {
   // Allows callers to resolve plugin roots and load paths against an explicit env
   // instead of the process-global environment.
   env?: NodeJS.ProcessEnv;
+  // Direct raw-config callers can opt into the same single env-substitution pass
+  // config IO normally performs before plugin validation.
+  resolveRawConfigEnvVars?: boolean;
   logger?: PluginLogger;
   coreGatewayHandlers?: Record<string, GatewayRequestHandler>;
   coreGatewayMethodNames?: readonly string[];
@@ -295,6 +301,7 @@ const LAZY_RUNTIME_REFLECTION_KEYS = [
   "subagent",
   "system",
   "media",
+  "mediaUnderstanding",
   "tts",
   "stt",
   "channel",
@@ -302,6 +309,10 @@ const LAZY_RUNTIME_REFLECTION_KEYS = [
   "logging",
   "state",
   "modelAuth",
+  "imageGeneration",
+  "videoGeneration",
+  "musicGeneration",
+  "llm",
 ] as const satisfies readonly (keyof PluginRuntime)[];
 
 function createPluginCandidatesFromManifestRegistry(
@@ -575,7 +586,52 @@ function rewriteBundledRuntimeArtifactRelativePath(relativePath: string): string
   return relativePath.replace(/\.[^.]+$/u, ".js");
 }
 
-function resolvePreferredBuiltBundledRuntimeArtifact(params: {
+function listPackageLocalRuntimeArtifactOutputExtensions(sourceExt: string): string[] {
+  switch (sourceExt) {
+    case ".mts":
+    case ".mjs":
+      return [".mjs", ".js", ".cjs"];
+    case ".cts":
+    case ".cjs":
+      return [".cjs", ".js", ".mjs"];
+    default:
+      return [".js", ".mjs", ".cjs"];
+  }
+}
+
+function listPackageLocalRuntimeArtifactRelativePathBases(relativePath: string): string[] {
+  const ext = path.extname(relativePath).toLowerCase();
+  const withoutExt = ext ? relativePath.slice(0, -ext.length) : relativePath;
+  if (!withoutExt.startsWith(`src${path.sep}`) && !withoutExt.startsWith("src/")) {
+    return [withoutExt];
+  }
+  return [withoutExt.slice(4), withoutExt];
+}
+
+function listPackageLocalDistRuntimeArtifactRelativePaths(relativePath: string): string[] {
+  const ext = path.extname(relativePath).toLowerCase();
+  const candidates = new Set<string>();
+  for (const base of listPackageLocalRuntimeArtifactRelativePathBases(relativePath)) {
+    for (const outputExt of listPackageLocalRuntimeArtifactOutputExtensions(ext)) {
+      candidates.add(`${base}${outputExt}`);
+    }
+  }
+  return [...candidates];
+}
+
+function shouldPreferPackageLocalDistRuntimeArtifact(source: string): boolean {
+  switch (path.extname(source).toLowerCase()) {
+    case ".ts":
+    case ".tsx":
+    case ".mts":
+    case ".cts":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function resolvePreferredBuiltRuntimeArtifact(params: {
   source: string;
   rootDir: string;
   origin: PluginOrigin;
@@ -583,7 +639,30 @@ function resolvePreferredBuiltBundledRuntimeArtifact(params: {
 }): { source: string; rootDir: string } {
   const rootDir = safeRealpathOrResolve(params.rootDir);
   const source = safeRealpathOrResolve(params.source);
-  if (!params.preferBuiltPluginArtifacts || params.origin !== "bundled") {
+  if (!params.preferBuiltPluginArtifacts) {
+    return { source, rootDir };
+  }
+  if (params.origin !== "bundled") {
+    const relativeSource = path.relative(rootDir, source);
+    if (
+      shouldPreferPackageLocalDistRuntimeArtifact(relativeSource) &&
+      relativeSource !== "" &&
+      !relativeSource.startsWith("..") &&
+      !path.isAbsolute(relativeSource)
+    ) {
+      const artifactRoot = path.join(rootDir, "dist");
+      for (const artifactRelativePath of listPackageLocalDistRuntimeArtifactRelativePaths(
+        relativeSource,
+      )) {
+        const artifactSource = path.join(artifactRoot, artifactRelativePath);
+        if (fs.existsSync(artifactSource)) {
+          return {
+            source: safeRealpathOrResolve(artifactSource),
+            rootDir,
+          };
+        }
+      }
+    }
     return { source, rootDir };
   }
   const extensionsDir = path.dirname(rootDir);
@@ -820,6 +899,7 @@ function buildCacheKey(params: {
   requireSetupEntryForSetupOnlyChannelPlugins?: boolean;
   preferSetupRuntimeForChannelPlugins?: boolean;
   preferBuiltPluginArtifacts?: boolean;
+  resolveRawConfigEnvVars?: boolean;
   toolDiscovery?: boolean;
   loadModules?: boolean;
   runtimeSubagentMode?: "default" | "explicit" | "gateway-bindable";
@@ -862,6 +942,8 @@ function buildCacheKey(params: {
     params.preferSetupRuntimeForChannelPlugins === true ? "prefer-setup" : "full";
   const bundledArtifactMode =
     params.preferBuiltPluginArtifacts === true ? "prefer-built-artifacts" : "source-default";
+  const rawConfigEnvMode =
+    params.resolveRawConfigEnvVars === true ? "resolve-raw-env" : "runtime-config";
   const moduleLoadMode = params.loadModules === false ? "manifest-only" : "load-modules";
   const discoveryMode = params.toolDiscovery === true ? "tool-discovery" : "default-discovery";
   const runtimeSubagentMode = params.runtimeSubagentMode ?? "default";
@@ -874,7 +956,7 @@ function buildCacheKey(params: {
     installs,
     loadPaths,
     activationMetadataKey: params.activationMetadataKey ?? "",
-  })}::${scopeKey}::${setupOnlyKey}::${setupOnlyModeKey}::${setupOnlyRequirementKey}::${startupChannelMode}::${bundledArtifactMode}::${moduleLoadMode}::${discoveryMode}::${runtimeSubagentMode}::${params.pluginSdkResolution ?? "auto"}::${gatewayMethodsKey}::${activationMode}`;
+  })}::${scopeKey}::${setupOnlyKey}::${setupOnlyModeKey}::${setupOnlyRequirementKey}::${startupChannelMode}::${bundledArtifactMode}::${rawConfigEnvMode}::${moduleLoadMode}::${discoveryMode}::${runtimeSubagentMode}::${params.pluginSdkResolution ?? "auto"}::${gatewayMethodsKey}::${activationMode}`;
 }
 
 function matchesScopedPluginRequest(params: {
@@ -937,6 +1019,16 @@ function buildActivationMetadataHash(params: {
     .digest("hex");
 }
 
+function redactPluginConfigForCacheKey(plugins: NormalizedPluginsConfig): NormalizedPluginsConfig {
+  const entries = Object.fromEntries(
+    Object.entries(plugins.entries).map(([pluginId, entry]) => [
+      pluginId,
+      "config" in entry ? { ...entry, config: "<plugin-config>" } : entry,
+    ]),
+  );
+  return { ...plugins, entries };
+}
+
 function hasExplicitCompatibilityInputs(options: PluginLoadOptions): boolean {
   return (
     options.config !== undefined ||
@@ -944,6 +1036,7 @@ function hasExplicitCompatibilityInputs(options: PluginLoadOptions): boolean {
     options.autoEnabledReasons !== undefined ||
     options.workspaceDir !== undefined ||
     options.env !== undefined ||
+    options.resolveRawConfigEnvVars !== undefined ||
     hasExplicitPluginIdScope(options.onlyPluginIds) ||
     options.runtimeOptions !== undefined ||
     options.pluginSdkResolution !== undefined ||
@@ -1132,12 +1225,27 @@ function applyManifestSnapshotMetadata(
 }
 
 function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
-  const env = options.env ?? process.env;
-  const cfg = applyTestPluginDefaults(options.config ?? {}, env);
-  const activationSourceConfig = resolvePluginActivationSourceConfig({
+  const shouldResolveRawConfigEnvVars = options.resolveRawConfigEnvVars === true;
+  const baseEnv = options.env ?? process.env;
+  const rawConfig = options.config ?? {};
+  const rawActivationSourceConfig = resolvePluginActivationSourceConfig({
     config: options.config,
     activationSourceConfig: options.activationSourceConfig,
   });
+  const env = shouldResolveRawConfigEnvVars ? createConfigRuntimeEnv(rawConfig, baseEnv) : baseEnv;
+  const cfg = applyTestPluginDefaults(
+    shouldResolveRawConfigEnvVars
+      ? (resolveConfigEnvVars(rawConfig, env, {
+          onMissing: () => undefined,
+        }) as OpenClawConfig)
+      : rawConfig,
+    env,
+  );
+  const activationSourceConfig = shouldResolveRawConfigEnvVars
+    ? (resolveConfigEnvVars(rawActivationSourceConfig, env, {
+        onMissing: () => undefined,
+      }) as OpenClawConfig)
+    : rawActivationSourceConfig;
   const normalized = normalizePluginsConfig(cfg.plugins);
   const activationSource = createPluginActivationSource({
     config: activationSourceConfig,
@@ -1161,7 +1269,9 @@ function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
   };
   const cacheKey = buildCacheKey({
     workspaceDir: options.workspaceDir,
-    plugins: trustNormalized,
+    plugins: shouldResolveRawConfigEnvVars
+      ? redactPluginConfigForCacheKey(trustNormalized)
+      : trustNormalized,
     activationMetadataKey: buildActivationMetadataHash({
       activationSource,
       autoEnabledReasons: options.autoEnabledReasons ?? {},
@@ -1174,6 +1284,7 @@ function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
     requireSetupEntryForSetupOnlyChannelPlugins,
     preferSetupRuntimeForChannelPlugins,
     preferBuiltPluginArtifacts,
+    resolveRawConfigEnvVars: options.resolveRawConfigEnvVars,
     toolDiscovery: options.toolDiscovery,
     loadModules: options.loadModules,
     runtimeSubagentMode,
@@ -1243,6 +1354,9 @@ function mergePluginTrustList(runtimeList: string[], sourceList: readonly string
 function getCompatibleActivePluginRegistry(
   options: PluginLoadOptions = {},
 ): PluginRegistry | undefined {
+  if (options.resolveRawConfigEnvVars === true) {
+    return undefined;
+  }
   const activeRegistry = getActivePluginRegistry() ?? undefined;
   if (!activeRegistry) {
     return undefined;
@@ -1407,21 +1521,22 @@ function validatePluginConfig(params: {
   cacheKey?: string;
   value?: unknown;
 }): { ok: boolean; value?: Record<string, unknown>; errors?: string[] } {
+  const value = params.value;
   const schema = params.schema;
   if (!schema) {
-    return { ok: true, value: params.value as Record<string, unknown> | undefined };
+    return { ok: true, value: value as Record<string, unknown> | undefined };
   }
   if (isEmptyPluginConfigJsonSchema(schema)) {
     if (
-      params.value === undefined ||
-      (params.value &&
-        typeof params.value === "object" &&
-        !Array.isArray(params.value) &&
-        Object.keys(params.value).length === 0)
+      value === undefined ||
+      (value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        Object.keys(value).length === 0)
     ) {
       return { ok: true, value: {} };
     }
-    if (!params.value || typeof params.value !== "object" || Array.isArray(params.value)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
       return { ok: false, errors: ["<root>: must be object"] };
     }
     return { ok: false, errors: ["<root>: config must be empty"] };
@@ -1430,7 +1545,7 @@ function validatePluginConfig(params: {
   const result = validateJsonSchemaValue({
     schema,
     cacheKey,
-    value: params.value ?? {},
+    value: value ?? {},
     applyDefaults: true,
   });
   if (result.ok) {
@@ -1594,7 +1709,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
   const validateOnly = options.mode === "validate";
   const onlyPluginIdSet = createPluginIdScopeSet(onlyPluginIds);
 
-  const cacheEnabled = options.cache !== false;
+  const cacheEnabled = options.cache !== false && options.resolveRawConfigEnvVars !== true;
   if (cacheEnabled) {
     const cached = getReusableCachedPluginRegistry({
       cacheKey,
@@ -1919,14 +2034,14 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
         });
       };
       const pluginRoot = safeRealpathOrResolve(candidate.rootDir);
-      const runtimeCandidateEntry = resolvePreferredBuiltBundledRuntimeArtifact({
+      const runtimeCandidateEntry = resolvePreferredBuiltRuntimeArtifact({
         source: candidate.source,
         rootDir: pluginRoot,
         origin: candidate.origin,
         preferBuiltPluginArtifacts,
       });
       const runtimeSetupEntry = manifestRecord.setupSource
-        ? resolvePreferredBuiltBundledRuntimeArtifact({
+        ? resolvePreferredBuiltRuntimeArtifact({
             source: manifestRecord.setupSource,
             rootDir: pluginRoot,
             origin: candidate.origin,
@@ -2216,6 +2331,14 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
           if (
             registrationPlan.loadSetupRuntimeEntry &&
             setupRegistration.usesBundledSetupContract &&
+            !shouldDeferConfiguredChannelFullRuntimeMerge({
+              manifestChannels: manifestRecord.channels,
+              startupDeferConfiguredChannelFullLoadUntilAfterListen:
+                manifestRecord.startupDeferConfiguredChannelFullLoadUntilAfterListen,
+              cfg,
+              env,
+              preferSetupRuntimeForChannelPlugins,
+            }) &&
             resolveCanonicalDistRuntimeSource(runtimeCandidateEntry.source) !== safeSource
           ) {
             const runtimeModuleSource = resolveCanonicalDistRuntimeSource(
@@ -2358,6 +2481,34 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
                 diagnosticMessagePrefix: "failed to apply setup channel runtime: ",
               });
               continue;
+            }
+          }
+          if (registrationMode === "setup-runtime") {
+            const registerSetupRuntime = mergedSetupRegistration.registerSetupRuntime;
+            if (registerSetupRuntime) {
+              const registrySnapshot = snapshotPluginRegistry(registry);
+              try {
+                runPluginRegisterSync(
+                  (registrationApi) => registerSetupRuntime(registrationApi),
+                  api,
+                );
+              } catch (err) {
+                restorePluginRegistry(registry, registrySnapshot);
+                recordPluginError({
+                  logger,
+                  registry,
+                  record,
+                  seenIds,
+                  pluginId,
+                  origin: candidate.origin,
+                  phase: "register",
+                  error: err,
+                  logPrefix: `[plugins] ${record.id} failed to register setup-runtime channel side effects from ${record.source}: `,
+                  diagnosticMessagePrefix:
+                    "failed to register setup-runtime channel side effects: ",
+                });
+                continue;
+              }
             }
           }
           api.registerChannel(mergedSetupPlugin);

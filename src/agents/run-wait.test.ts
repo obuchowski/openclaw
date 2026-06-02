@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_TIMER_TIMEOUT_MS } from "../shared/number-coercion.js";
 
 const callGatewayMock = vi.fn();
 vi.mock("../gateway/call.js", () => ({
@@ -57,8 +58,10 @@ function expectAgentWaitRequest(
 
   const paramTimeoutMs = expectNumber(request.params?.timeoutMs, `${runId} param timeoutMs`);
   const requestTimeoutMs = expectNumber(request.timeoutMs, `${runId} request timeoutMs`);
-  expect(requestTimeoutMs).toBe(paramTimeoutMs + 2_000);
-  expect(requestTimeoutMs).toBeLessThanOrEqual(maxParamTimeoutMs + 2_000);
+  expect(requestTimeoutMs).toBe(Math.min(paramTimeoutMs + 2_000, MAX_TIMER_TIMEOUT_MS));
+  expect(requestTimeoutMs).toBeLessThanOrEqual(
+    Math.min(maxParamTimeoutMs + 2_000, MAX_TIMER_TIMEOUT_MS),
+  );
   expect(paramTimeoutMs).toBeGreaterThanOrEqual(1);
   expect(paramTimeoutMs).toBeLessThanOrEqual(maxParamTimeoutMs);
 }
@@ -220,6 +223,22 @@ describe("waitForAgentRun", () => {
     expect(result).toEqual({ status: "pending" });
   });
 
+  it("preserves pending error diagnostics on wait timeouts", async () => {
+    callGatewayMock.mockResolvedValue({
+      status: "timeout",
+      error: "429 RESOURCE_EXHAUSTED",
+      pendingError: true,
+    });
+
+    const result = await waitForAgentRun({ runId: "run-pending-error", timeoutMs: 500 });
+
+    expect(result).toEqual({
+      status: "timeout",
+      error: "429 RESOURCE_EXHAUSTED",
+      pendingError: true,
+    });
+  });
+
   it("normalizes wait timeouts before sending agent.wait", async () => {
     callGatewayMock.mockResolvedValue({ status: "ok" });
 
@@ -236,7 +255,42 @@ describe("waitForAgentRun", () => {
     });
   });
 
-  it("preserves timing metadata from agent.wait", async () => {
+  it("defaults non-finite wait timeouts before sending agent.wait", async () => {
+    callGatewayMock.mockResolvedValue({ status: "ok" });
+
+    const result = await waitForAgentRun({ runId: "run-nan", timeoutMs: Number.NaN });
+
+    expect(result).toEqual({ status: "ok" });
+    expect(callGatewayMock).toHaveBeenCalledWith({
+      method: "agent.wait",
+      params: {
+        runId: "run-nan",
+        timeoutMs: 1,
+      },
+      timeoutMs: 2_001,
+    });
+  });
+
+  it("caps oversized wait timeouts before sending agent.wait", async () => {
+    callGatewayMock.mockResolvedValue({ status: "ok" });
+
+    const result = await waitForAgentRun({
+      runId: "run-huge",
+      timeoutMs: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(result).toEqual({ status: "ok" });
+    expect(callGatewayMock).toHaveBeenCalledWith({
+      method: "agent.wait",
+      params: {
+        runId: "run-huge",
+        timeoutMs: MAX_TIMER_TIMEOUT_MS,
+      },
+      timeoutMs: MAX_TIMER_TIMEOUT_MS,
+    });
+  });
+
+  it("preserves timing metadata on provider-attributed wait timeouts", async () => {
     callGatewayMock.mockResolvedValue({
       status: "ok",
       startedAt: 100,
@@ -440,5 +494,29 @@ describe("waitForAgentRunsToDrain", () => {
     expect(requests).toHaveLength(2);
     expectAgentWaitRequest(requireRequestAt(requests, 0), "run-1", 1_000);
     expectAgentWaitRequest(requireRequestAt(requests, 1), "run-2", 1_000);
+  });
+
+  it("defaults non-finite drain timeouts before computing the deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-30T00:00:00Z"));
+    callGatewayMock.mockResolvedValue({ status: "ok" });
+    let activeRunIds = ["run-1"];
+
+    try {
+      const result = await waitForAgentRunsToDrain({
+        timeoutMs: Number.NaN,
+        getPendingRunIds: () => {
+          const current = activeRunIds;
+          activeRunIds = [];
+          return current;
+        },
+      });
+
+      expect(result.timedOut).toBe(false);
+      expect(Number.isFinite(result.deadlineAtMs)).toBe(true);
+      expectAgentWaitRequest(requireRequestAt(gatewayWaitRequests(), 0), "run-1", 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

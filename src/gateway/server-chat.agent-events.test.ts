@@ -44,6 +44,7 @@ import {
   createSessionEventSubscriberRegistry,
   createSessionMessageSubscriberRegistry,
   createToolEventRecipientRegistry,
+  type AgentEventHandlerOptions,
 } from "./server-chat.js";
 import { loadGatewaySessionRow } from "./server-chat.load-gateway-session-row.runtime.js";
 import { loadSessionEntry } from "./session-utils.js";
@@ -79,6 +80,7 @@ describe("agent event handler", () => {
     resolveSessionKeyForRun?: (runId: string) => string | undefined;
     lifecycleErrorRetryGraceMs?: number;
     isChatSendRunActive?: (runId: string) => boolean;
+    clearTrackedActiveRun?: AgentEventHandlerOptions["clearTrackedActiveRun"];
   }) {
     const nowSpy =
       params?.now === undefined ? undefined : vi.spyOn(Date, "now").mockReturnValue(params.now);
@@ -86,6 +88,8 @@ describe("agent event handler", () => {
     const broadcastToConnIds = vi.fn();
     const nodeSendToSession = vi.fn();
     const clearAgentRunContext = vi.fn();
+    const clearTrackedActiveRun =
+      vi.fn<NonNullable<AgentEventHandlerOptions["clearTrackedActiveRun"]>>();
     const agentRunSeq = new Map<string, number>();
     const chatRunState = createChatRunState();
     const toolEventRecipients = createToolEventRecipientRegistry();
@@ -106,6 +110,7 @@ describe("agent event handler", () => {
       loadGatewaySessionRowForSnapshot: loadGatewaySessionRow,
       lifecycleErrorRetryGraceMs: params?.lifecycleErrorRetryGraceMs,
       isChatSendRunActive: params?.isChatSendRunActive,
+      clearTrackedActiveRun: params?.clearTrackedActiveRun ?? clearTrackedActiveRun,
     });
 
     return {
@@ -114,6 +119,7 @@ describe("agent event handler", () => {
       broadcastToConnIds,
       nodeSendToSession,
       clearAgentRunContext,
+      clearTrackedActiveRun,
       agentRunSeq,
       chatRunState,
       toolEventRecipients,
@@ -1846,6 +1852,95 @@ describe("agent event handler", () => {
     resetAgentRunContextForTest();
   });
 
+  it("clears tracked active runs before terminal sessions.changed broadcasts", () => {
+    vi.mocked(loadGatewaySessionRow).mockReturnValue({
+      key: "session-finished",
+      kind: "direct",
+      updatedAt: 1_650,
+      status: "running",
+      startedAt: 900,
+    });
+    const {
+      broadcastToConnIds,
+      clearTrackedActiveRun,
+      chatRunState,
+      sessionEventSubscribers,
+      handler,
+    } = createHarness();
+    sessionEventSubscribers.subscribe("conn-session");
+    chatRunState.registry.add("provider-run", {
+      sessionKey: "session-finished",
+      clientRunId: "client-run",
+    });
+
+    handler({
+      runId: "provider-run",
+      seq: 2,
+      stream: "lifecycle",
+      ts: 1_800,
+      data: {
+        phase: "end",
+        startedAt: 900,
+        endedAt: 1_700,
+      },
+    });
+
+    expect(clearTrackedActiveRun).toHaveBeenCalledWith({
+      runId: "provider-run",
+      clientRunId: "client-run",
+      sessionKey: "session-finished",
+    });
+    expect(requireMockArg(broadcastToConnIds, 0, 0, "sessions changed event")).toBe(
+      "sessions.changed",
+    );
+    expect(clearTrackedActiveRun.mock.invocationCallOrder[0]).toBeLessThan(
+      broadcastToConnIds.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
+  it("keeps chat send retry guards while hiding terminal session projection across session aliases", () => {
+    const trackedActiveRuns = new Map<
+      string,
+      { sessionKey: string; projectSessionActive?: boolean }
+    >([
+      ["provider-run", { sessionKey: "session-finished" }],
+      ["client-run", { sessionKey: "requested-session" }],
+    ]);
+    const { chatRunState, handler } = createHarness({
+      clearTrackedActiveRun: ({ runId, clientRunId }) => {
+        for (const candidateRunId of new Set([runId, clientRunId])) {
+          const entry = trackedActiveRuns.get(candidateRunId);
+          if (entry) {
+            entry.projectSessionActive = false;
+          }
+        }
+      },
+    });
+    chatRunState.registry.add("provider-run", {
+      sessionKey: "session-finished",
+      clientRunId: "client-run",
+    });
+
+    handler({
+      runId: "provider-run",
+      seq: 2,
+      stream: "lifecycle",
+      ts: 1_800,
+      data: {
+        phase: "end",
+        startedAt: 900,
+        endedAt: 1_700,
+      },
+    });
+
+    const providerGuard = trackedActiveRuns.get("provider-run");
+    const retryGuard = trackedActiveRuns.get("client-run");
+    expect(providerGuard?.projectSessionActive).toBe(false);
+    expect(retryGuard).toBeDefined();
+    expect(retryGuard?.sessionKey).toBe("requested-session");
+    expect(retryGuard?.projectSessionActive).toBe(false);
+  });
+
   it("keeps aborted chat run markers through terminal lifecycle cleanup", () => {
     const { broadcast, chatRunState, handler } = createHarness();
     chatRunState.registry.add("run-aborted", {
@@ -2346,15 +2441,20 @@ describe("agent event handler", () => {
       state?: string;
       errorKind?: string;
       errorMessage?: string;
+      message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
     };
     expect(payload.state).toBe("error");
     expect(payload.errorKind).toBe("rate_limit");
     expect(payload.errorMessage).toContain("Too many requests");
+    expect(payload.message?.role).toBe("assistant");
+    expect(payload.message?.content?.[0]?.text).toContain("Too many requests");
 
     const nodePayload = sessionChatCalls(nodeSendToSession).at(-1)?.[2] as {
       errorKind?: string;
+      message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
     };
     expect(nodePayload.errorKind).toBe("rate_limit");
+    expect(nodePayload.message?.content?.[0]?.text).toContain("Too many requests");
   });
 
   it("suppresses delayed lifecycle chat errors for active chat.send runs while still cleaning up", () => {

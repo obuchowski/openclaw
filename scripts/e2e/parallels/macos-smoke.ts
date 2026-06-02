@@ -13,6 +13,8 @@ import {
   parseProvider,
   modelProviderConfigBatchJson,
   posixProviderOnlyPluginIsolationScript,
+  parsePositiveInt,
+  readPositiveIntEnv,
   resolveParallelsModelTimeoutSeconds,
   resolveHostIp,
   resolveHostPort,
@@ -188,7 +190,7 @@ function parseArgs(argv: string[]): MacosOptions {
         i++;
         break;
       case "--host-port":
-        options.hostPort = Number(ensureValue(argv, i, arg));
+        options.hostPort = parsePositiveInt(ensureValue(argv, i, arg), arg);
         options.hostPortExplicit = true;
         i++;
         break;
@@ -241,6 +243,7 @@ function parseArgs(argv: string[]): MacosOptions {
 }
 
 class MacosSmoke {
+  private agentTimeoutSeconds: number;
   private auth: ProviderAuth;
   private discordToken = "";
   private hostIp = "";
@@ -258,6 +261,8 @@ class MacosSmoke {
   private discord: MacosDiscordSmoke | null = null;
   private guestUser = "";
   private guestTransport: "current-user" | "sudo" = "current-user";
+  private modelTimeoutSeconds: number;
+  private updateDevTimeoutSeconds: number;
 
   private status = {
     freshAgent: "skip",
@@ -282,6 +287,12 @@ class MacosSmoke {
       modelId: options.modelId,
       provider: options.provider,
     });
+    this.agentTimeoutSeconds = readPositiveIntEnv("OPENCLAW_PARALLELS_MACOS_AGENT_TIMEOUT_S", 2700);
+    this.modelTimeoutSeconds = resolveParallelsModelTimeoutSeconds("macos");
+    this.updateDevTimeoutSeconds = readPositiveIntEnv(
+      "OPENCLAW_PARALLELS_MACOS_UPDATE_DEV_TIMEOUT_S",
+      1800,
+    );
     this.validateDiscord();
   }
 
@@ -475,15 +486,12 @@ class MacosSmoke {
     this.status.freshGateway = "pass";
     await this.phase("fresh.dashboard-load", 180, () => this.verifyDashboardLoad());
     this.status.freshDashboard = "pass";
-    await this.phase(
-      "fresh.first-agent-turn",
-      Number(process.env.OPENCLAW_PARALLELS_MACOS_AGENT_TIMEOUT_S || 2700),
-      () => this.verifyTurn(),
-    );
+    await this.phase("fresh.first-agent-turn", this.agentTimeoutSeconds, () => this.verifyTurn());
     this.status.freshAgent = "pass";
     if (this.discordEnabled()) {
       this.status.freshDiscord = "fail";
       await this.phase("fresh.discord-config", 600, () => this.configureDiscord());
+      await this.phase("fresh.discord-gateway-ready", 180, () => this.ensureDiscordGatewayReady());
       await this.phase("fresh.discord-roundtrip", 180, () => this.runDiscordRoundtrip("fresh"));
       this.status.freshDiscord = "pass";
     }
@@ -518,10 +526,8 @@ class MacosSmoke {
         this.verifyBundlePermissions(),
       );
     } else {
-      await this.phase(
-        "upgrade.update-dev",
-        Number(process.env.OPENCLAW_PARALLELS_MACOS_UPDATE_DEV_TIMEOUT_S || 1800),
-        () => this.runDevChannelUpdate(),
+      await this.phase("upgrade.update-dev", this.updateDevTimeoutSeconds, () =>
+        this.runDevChannelUpdate(),
       );
       this.status.upgradeVersion = await this.extractLastVersion("upgrade.update-dev");
       await this.phase("upgrade.verify-dev-channel", 60, () => this.verifyDevChannelUpdate());
@@ -532,15 +538,14 @@ class MacosSmoke {
     this.status.upgradeGateway = "pass";
     await this.phase("upgrade.dashboard-load", 180, () => this.verifyDashboardLoad());
     this.status.upgradeDashboard = "pass";
-    await this.phase(
-      "upgrade.first-agent-turn",
-      Number(process.env.OPENCLAW_PARALLELS_MACOS_AGENT_TIMEOUT_S || 2700),
-      () => this.verifyTurn(),
-    );
+    await this.phase("upgrade.first-agent-turn", this.agentTimeoutSeconds, () => this.verifyTurn());
     this.status.upgradeAgent = "pass";
     if (this.discordEnabled()) {
       this.status.upgradeDiscord = "fail";
       await this.phase("upgrade.discord-config", 600, () => this.configureDiscord());
+      await this.phase("upgrade.discord-gateway-ready", 180, () =>
+        this.ensureDiscordGatewayReady(),
+      );
       await this.phase("upgrade.discord-roundtrip", 180, () => this.runDiscordRoundtrip("upgrade"));
       this.status.upgradeDiscord = "pass";
     }
@@ -1005,7 +1010,11 @@ exit 1`);
 
   private verifyTurn(): void {
     this.guestOpenClawEntryExec(["models", "set", this.auth.modelId]);
-    const modelProviderConfigBatch = modelProviderConfigBatchJson(this.auth.modelId, "macos");
+    const modelProviderConfigBatch = modelProviderConfigBatchJson(
+      this.auth.modelId,
+      "macos",
+      this.modelTimeoutSeconds,
+    );
     if (modelProviderConfigBatch) {
       this.guestSh(`provider_config_batch="$(mktemp)"
 cat >"$provider_config_batch" <<'JSON'
@@ -1034,7 +1043,7 @@ for attempt in 1 2; do
   set +e
   /usr/bin/env ${shellQuote(`${this.auth.apiKeyEnv}=${this.auth.apiKeyValue}`)} ${guestOpenClawEntryRunner} agent --local --agent main --session-id "$session_id" --message ${shellQuote(
     "Reply with exact ASCII text OK only.",
-  )} --thinking off --timeout ${resolveParallelsModelTimeoutSeconds("macos")} --json >"$output_file" 2>&1
+  )} --thinking off --timeout ${this.modelTimeoutSeconds} --json >"$output_file" 2>&1
   rc=$?
   set -e
   cat "$output_file"
@@ -1062,6 +1071,15 @@ fi`,
 
   private configureDiscord(): void {
     this.discord?.configure();
+  }
+
+  private ensureDiscordGatewayReady(): void {
+    this.startManualGatewayIfNeeded();
+    this.verifyGateway();
+    const status = this.guestOpenClawEntryExec(["channels", "status", "--probe", "--json"]);
+    if (!status.includes('"discord"')) {
+      throw new Error("Discord channel unavailable after gateway restart");
+    }
   }
 
   private async runDiscordRoundtrip(phase: "fresh" | "upgrade"): Promise<void> {

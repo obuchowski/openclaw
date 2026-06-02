@@ -170,6 +170,19 @@ const CHAT_ERROR_KINDS = new Set<ErrorKind>([
   "unknown",
 ]);
 
+function buildChatErrorMessage(error: unknown): Record<string, unknown> | undefined {
+  const raw = error ? formatForLog(error).trim() : "";
+  if (!raw) {
+    return undefined;
+  }
+  const text = raw.startsWith("⚠️") || raw.startsWith("Error:") ? raw : `Error: ${raw}`;
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    timestamp: Date.now(),
+  };
+}
+
 function readChatErrorKind(value: unknown): ErrorKind | undefined {
   return typeof value === "string" && CHAT_ERROR_KINDS.has(value as ErrorKind)
     ? (value as ErrorKind)
@@ -231,6 +244,11 @@ export type AgentEventHandlerOptions = {
   loadGatewaySessionRowForSnapshot?: typeof loadGatewaySessionRow;
   lifecycleErrorRetryGraceMs?: number;
   isChatSendRunActive?: (runId: string) => boolean;
+  clearTrackedActiveRun?: (params: {
+    runId: string;
+    clientRunId: string;
+    sessionKey: string;
+  }) => void;
 };
 
 export function createAgentEventHandler({
@@ -247,6 +265,7 @@ export function createAgentEventHandler({
   loadGatewaySessionRowForSnapshot = loadGatewaySessionRow,
   lifecycleErrorRetryGraceMs = AGENT_LIFECYCLE_ERROR_RETRY_GRACE_MS,
   isChatSendRunActive = () => false,
+  clearTrackedActiveRun,
 }: AgentEventHandlerOptions) {
   type TerminalLifecycleOptions = { skipChatErrorFinal?: boolean };
   type PendingTerminalLifecycleError = {
@@ -268,20 +287,8 @@ export function createAgentEventHandler({
     agentTextThrottleKey(clientRunId, "thinking"),
   ];
 
-  const clearAgentTextThrottleState = (clientRunId: string) => {
-    for (const key of agentTextThrottleKeys(clientRunId)) {
-      chatRunState.agentDeltaSentAt.delete(key);
-      chatRunState.bufferedAgentEvents.delete(key);
-    }
-  };
-
   const clearBufferedChatState = (clientRunId: string) => {
-    chatRunState.rawBuffers.delete(clientRunId);
-    chatRunState.buffers.delete(clientRunId);
-    chatRunState.deltaSentAt.delete(clientRunId);
-    chatRunState.deltaLastBroadcastLen.delete(clientRunId);
-    chatRunState.deltaLastBroadcastText.delete(clientRunId);
-    clearAgentTextThrottleState(clientRunId);
+    chatRunState.clearRun(clientRunId);
   };
 
   const clearPendingTerminalLifecycleError = (runId: string) => {
@@ -350,6 +357,7 @@ export function createAgentEventHandler({
       origin: row?.origin,
       spawnedBy: row?.spawnedBy,
       spawnedWorkspaceDir: row?.spawnedWorkspaceDir,
+      spawnedCwd: row?.spawnedCwd,
       forkedFromParent: row?.forkedFromParent,
       spawnDepth: row?.spawnDepth,
       subagentRole: row?.subagentRole,
@@ -461,6 +469,7 @@ export function createAgentEventHandler({
     agentRunSeq.delete(clientRunId);
 
     if (sessionKey) {
+      clearTrackedActiveRun?.({ runId: evt.runId, clientRunId, sessionKey });
       void persistGatewaySessionLifecycleEvent({ sessionKey, event: evt }).catch(() => undefined);
       const sessionEventConnIds = sessionEventSubscribers.getAll();
       if (sessionEventConnIds.size > 0) {
@@ -517,7 +526,9 @@ export function createAgentEventHandler({
     if (!mergedRawText) {
       return;
     }
+    const now = Date.now();
     chatRunState.rawBuffers.set(clientRunId, mergedRawText);
+    chatRunState.bufferUpdatedAt.set(clientRunId, now);
     const projected = projectLiveAssistantBufferedText(mergedRawText);
     const mergedText = projected.text;
     chatRunState.buffers.set(clientRunId, mergedText);
@@ -527,7 +538,6 @@ export function createAgentEventHandler({
     if (shouldHideHeartbeatChatOutput(clientRunId, sourceRunId)) {
       return;
     }
-    const now = Date.now();
     const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
     if (now - last < 150) {
       return;
@@ -670,12 +680,7 @@ export function createAgentEventHandler({
     // suppressed the most recent chunk, leaving the client with stale text.
     // Only flush if the buffered text differs from the last broadcast to avoid duplicates.
     flushBufferedChatDeltaIfNeeded(sessionKey, clientRunId, sourceRunId, seq, opts);
-    chatRunState.deltaLastBroadcastLen.delete(clientRunId);
-    chatRunState.deltaLastBroadcastText.delete(clientRunId);
-    chatRunState.rawBuffers.delete(clientRunId);
-    chatRunState.buffers.delete(clientRunId);
-    chatRunState.deltaSentAt.delete(clientRunId);
-    clearAgentTextThrottleState(clientRunId);
+    chatRunState.clearRun(clientRunId);
     const spawnedBy = resolveSpawnedBy(sessionKey);
     if (jobState === "done") {
       const payload = {
@@ -704,6 +709,7 @@ export function createAgentEventHandler({
       seq,
       state: "error" as const,
       errorMessage: error ? formatForLog(error) : undefined,
+      message: buildChatErrorMessage(error),
       ...(errorKind && { errorKind }),
     };
     sendChatPayload(sessionKey, payload, opts);

@@ -1,10 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
+  GATEWAY_CLIENT_CAPS,
+  GATEWAY_CLIENT_MODES,
+  hasGatewayClientCap,
+} from "../../../packages/gateway-protocol/src/client-info.js";
+import {
+  ErrorCodes,
+  errorShape,
+  formatValidationErrors,
+  validateAgentIdentityParams,
+  validateAgentParams,
+  validateAgentWaitParams,
+} from "../../../packages/gateway-protocol/src/index.js";
+import {
   listAgentIds,
   resolveDefaultAgentId,
   resolveAgentWorkspaceDir,
 } from "../../agents/agent-scope.js";
+import { resolveTrustedGroupId } from "../../agents/agent-tools.policy.js";
 import {
   consumeExecApprovalFollowupRuntimeHandoff,
   parseExecApprovalFollowupApprovalId,
@@ -16,7 +30,6 @@ import {
 } from "../../agents/identity-avatar.js";
 import { AGENT_INTERNAL_EVENT_TYPE_TASK_COMPLETION } from "../../agents/internal-event-contract.js";
 import type { AgentInternalEvent } from "../../agents/internal-events.js";
-import { resolveTrustedGroupId } from "../../agents/pi-tools.policy.js";
 import { resolveProviderIdForAuth } from "../../agents/provider-auth-aliases.js";
 import {
   normalizeAgentRunTimeoutPhase,
@@ -52,6 +65,7 @@ import {
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
+import { resolveMaintenanceConfigFromInput } from "../../config/sessions/store-maintenance.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { formatUncaughtError, readErrorName } from "../../infra/errors.js";
@@ -120,19 +134,6 @@ import {
 import { resolveAssistantAvatarUrl } from "../control-ui-shared.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
 import {
-  GATEWAY_CLIENT_CAPS,
-  GATEWAY_CLIENT_MODES,
-  hasGatewayClientCap,
-} from "../protocol/client-info.js";
-import {
-  ErrorCodes,
-  errorShape,
-  formatValidationErrors,
-  validateAgentIdentityParams,
-  validateAgentParams,
-  validateAgentWaitParams,
-} from "../protocol/index.js";
-import {
   emitGatewaySessionEndPluginHook,
   emitGatewaySessionStartPluginHook,
   performGatewaySessionReset,
@@ -143,6 +144,7 @@ import {
   loadGatewaySessionRow,
   loadSessionEntry,
   migrateAndPruneGatewaySessionStoreKey,
+  resolveGatewaySessionStoreTarget,
   resolveGatewayModelSupportsImages,
   resolveSessionModelRef,
 } from "../session-utils.js";
@@ -293,6 +295,13 @@ function resolveSessionRuntimeWorkspace(params: {
   };
 }
 
+function resolveSessionRuntimeCwd(params: {
+  sessionEntry?: SessionEntry;
+  spawnedBy?: string;
+}): string | undefined {
+  return normalizeOptionalString(params.sessionEntry?.spawnedCwd);
+}
+
 function shouldSkipStartupContextForSpawnedSandbox(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
@@ -404,6 +413,7 @@ function emitSessionsChanged(
             origin: sessionRow.origin,
             spawnedBy: sessionRow.spawnedBy,
             spawnedWorkspaceDir: sessionRow.spawnedWorkspaceDir,
+            spawnedCwd: sessionRow.spawnedCwd,
             forkedFromParent: sessionRow.forkedFromParent,
             spawnDepth: sessionRow.spawnDepth,
             subagentRole: sessionRow.subagentRole,
@@ -1084,10 +1094,12 @@ export const agentHandlers: GatewayRequestHandlers = {
       if (normalizedAttachments.length > 0) {
         let baseProvider: string | undefined;
         let baseModel: string | undefined;
+        let requestedSessionEntry: SessionEntry | undefined;
         if (requestedSessionKeyRaw) {
           const { cfg: sessCfg, entry: sessEntry } = loadSessionEntry(requestedSessionKeyRaw, {
             clone: false,
           });
+          requestedSessionEntry = sessEntry;
           const sessionAgentId = resolveAgentIdFromSessionKey(requestedSessionKeyRaw);
           const modelRef = resolveSessionModelRef(sessCfg, sessEntry, sessionAgentId);
           baseProvider = modelRef.provider;
@@ -1095,11 +1107,17 @@ export const agentHandlers: GatewayRequestHandlers = {
         }
         const effectiveProvider = providerOverride || baseProvider;
         const effectiveModel = modelOverride || baseModel;
-        const supportsInlineImages = await resolveGatewayModelSupportsImages({
-          loadGatewayModelCatalog: context.loadGatewayModelCatalog,
-          provider: effectiveProvider,
-          model: effectiveModel,
-        });
+        const isConfirmedAcpSession =
+          request.acpTurnSource === "manual_spawn" &&
+          isAcpSessionKey(requestedSessionKeyRaw) &&
+          requestedSessionEntry?.acp != null;
+        const supportsInlineImages = isConfirmedAcpSession
+          ? true
+          : await resolveGatewayModelSupportsImages({
+              loadGatewayModelCatalog: context.loadGatewayModelCatalog,
+              provider: effectiveProvider,
+              model: effectiveModel,
+            });
 
         try {
           const parsed = await parseMessageWithAttachments(message, normalizedAttachments, {
@@ -1328,6 +1346,9 @@ export const agentHandlers: GatewayRequestHandlers = {
           clone: false,
         });
         cfgForAgent = cfg;
+        const sessionMaintenanceConfig = resolveMaintenanceConfigFromInput(
+          cfg.session?.maintenance,
+        );
         const now = Date.now();
         const resetPolicy = resolveSessionResetPolicy({
           sessionCfg: cfg.session,
@@ -1557,14 +1578,34 @@ export const agentHandlers: GatewayRequestHandlers = {
         if (storePath && !suppressVisibleSessionEffects) {
           const requestedStoreKey = requestedSessionKey;
           let deniedBySendPolicy = false;
+          let singleEntryPersistence:
+            | {
+                sessionKey: string;
+                entry: SessionEntry;
+              }
+            | undefined;
           const persisted = await updateSessionStore(
             storePath,
             (store) => {
-              const { primaryKey } = migrateAndPruneGatewaySessionStoreKey({
+              const storeKeysBeforeMigration = new Set(Object.keys(store));
+              const preMigrationTarget = resolveGatewaySessionStoreTarget({
                 cfg,
                 key: requestedStoreKey,
                 store,
               });
+              const hadLegacyStoreKey = preMigrationTarget.storeKeys.some(
+                (storeKey) =>
+                  storeKey !== preMigrationTarget.canonicalKey &&
+                  Object.prototype.hasOwnProperty.call(store, storeKey),
+              );
+              const { target, primaryKey } = migrateAndPruneGatewaySessionStoreKey({
+                cfg,
+                key: requestedStoreKey,
+                store,
+              });
+              const prunedStoreKey = [...storeKeysBeforeMigration].some(
+                (storeKey) => !Object.prototype.hasOwnProperty.call(store, storeKey),
+              );
               const freshEntry = store[primaryKey];
               patchBuild = buildSessionPatch(freshEntry);
               const effectivePatch =
@@ -1589,9 +1630,21 @@ export const agentHandlers: GatewayRequestHandlers = {
                 return merged;
               }
               store[primaryKey] = merged;
+              const canonicalKeyChanged = target.canonicalKey !== preMigrationTarget.canonicalKey;
+              singleEntryPersistence =
+                freshEntry && !hadLegacyStoreKey && !canonicalKeyChanged && !prunedStoreKey
+                  ? {
+                      sessionKey: primaryKey,
+                      entry: merged,
+                    }
+                  : undefined;
               return merged;
             },
-            { takeCacheOwnership: true },
+            {
+              takeCacheOwnership: true,
+              maintenanceConfig: sessionMaintenanceConfig,
+              resolveSingleEntryPersistence: () => singleEntryPersistence,
+            },
           );
           if (persisted) {
             sessionEntry = persisted;
@@ -2096,6 +2149,10 @@ export const agentHandlers: GatewayRequestHandlers = {
                 spawnedBy: spawnedByValue,
                 workspaceDir: sessionEntry?.spawnedWorkspaceDir,
               }),
+              cwd: resolveSessionRuntimeCwd({
+                spawnedBy: spawnedByValue,
+                sessionEntry,
+              }),
               allowModelOverride,
             },
             runId,
@@ -2240,6 +2297,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         stopReason: cachedGatewaySnapshot.stopReason,
         livenessState: cachedGatewaySnapshot.livenessState,
         yielded: cachedGatewaySnapshot.yielded,
+        pendingError: cachedGatewaySnapshot.pendingError,
         timeoutPhase: cachedGatewaySnapshot.timeoutPhase,
         providerStarted: cachedGatewaySnapshot.providerStarted,
       });
@@ -2302,6 +2360,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       stopReason: snapshot.stopReason,
       livenessState: snapshot.livenessState,
       yielded: snapshot.yielded,
+      pendingError: snapshot.pendingError,
       timeoutPhase: snapshot.timeoutPhase,
       providerStarted: snapshot.providerStarted,
     });
