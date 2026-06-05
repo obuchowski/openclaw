@@ -35,6 +35,48 @@
         "api": "openai-completions",
         "models": [
           {
+            "id": "accounts/fireworks/routers/kimi-k2p6-fast",
+            "name": "Kimi K2.6 Fast",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "contextWindow": 262144,
+            "maxTokens": 262144,
+            "cost": {
+              "input": 2,
+              "output": 8,
+              "cacheRead": 0.3,
+              "cacheWrite": 0
+            }
+          },
+          {
+            "id": "accounts/fireworks/routers/glm-5p1-fast",
+            "name": "GLM-5.1 Fast",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 202752,
+            "maxTokens": 202752,
+            "compat": {
+              "supportsReasoningEffort": true,
+              "supportedReasoningEfforts": ["none", "low", "medium", "high"],
+              "reasoningEffortMap": {
+                "off": "none",
+                "minimal": "low",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "xhigh": "high",
+                "adaptive": "high",
+                "max": "high"
+              }
+            },
+            "cost": {
+              "input": 2.8,
+              "output": 8.8,
+              "cacheRead": 0.52,
+              "cacheWrite": 0
+            }
+          },
+          {
             "id": "accounts/fireworks/models/kimi-k2p6",
             "name": "Kimi K2.6",
             "input": ["text", "image"],
@@ -43,7 +85,7 @@
             "cost": {
               "input": 0.95,
               "output": 4,
-              "cacheRead": 0,
+              "cacheRead": 0.16,
               "cacheWrite": 0
             }
           },
