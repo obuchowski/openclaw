@@ -864,11 +864,11 @@ function handleClaudeLiveControlRequest(
       subtype: "success",
       request_id: requestId,
       response: allowed
-        ? {
-            behavior: "allow",
-            updatedInput: toolInput,
-            ...(toolUseId ? { toolUseID: toolUseId } : {}),
-          }
+          ? {
+              behavior: "allow",
+              updatedInput: toolInput,
+              ...(toolUseId ? { toolUseID: toolUseId } : {}),
+            }
         : {
             behavior: "deny",
             decisionClassification: "user_reject",
