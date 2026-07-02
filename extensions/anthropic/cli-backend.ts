@@ -35,7 +35,11 @@ export function buildAnthropicCliBackend(): CliBackendPlugin {
     bundleMcpMode: "claude-config-file",
     nativeToolMode: "always-on",
     sideQuestionToolMode: "disabled",
-    ownsNativeCompaction: true,
+    // Dogfood: let OpenClaw's preflight own budget compaction (context engine /
+    // LCM) instead of deferring to Claude Code's internal autocompact. Claude's
+    // native autocompact stays enabled as a backstop for mid-turn overflow; with
+    // OpenClaw's budget far below the model window it fires first in practice.
+    ownsNativeCompaction: false,
     config: {
       command: "claude",
       args: [
