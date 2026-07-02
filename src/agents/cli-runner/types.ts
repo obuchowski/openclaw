@@ -190,6 +190,8 @@ export type PreparedCliRunContext = {
   hadSessionFile: boolean;
   contextEngineConfig: OpenClawConfig;
   contextEngine?: ContextEngine;
+  /** Set when the engine's host requirements exceed the CLI backend's capabilities. */
+  contextEngineDegradedReason?: string;
   contextEngineTurnPrompt?: string;
   contextEngineDeferredTurnMaintenance?: Promise<void>;
   modelId: string;

@@ -374,6 +374,7 @@ async function finalizeCliContextEngineTurn(params: {
     contextEngineHostSupport,
     providerId: runParams.provider,
     modelId: context.modelId,
+    degradedReason: context.contextEngineDegradedReason,
     runMaintenance: async (maintenanceParams) =>
       await runHarnessContextEngineMaintenance({
         ...maintenanceParams,
@@ -1020,6 +1021,7 @@ export async function runPreparedCliAgent(
       }),
       providerId: params.provider,
       modelId: context.modelId,
+      degradedReason: context.contextEngineDegradedReason,
       warn: (message) => log.warn(message),
     });
     const contextEngineHistoryMessages = context.contextEngine

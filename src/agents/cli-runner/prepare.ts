@@ -5,8 +5,8 @@
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { getRuntimeConfig } from "../../config/config.js";
 import {
-  assertContextEngineHostSupport,
   buildGenericCliContextEngineHostSupport,
+  evaluateContextEngineHostSupport,
 } from "../../context-engine/host-compat.js";
 import { ensureContextEnginesInitialized } from "../../context-engine/init.js";
 import { resolveContextEngine } from "../../context-engine/registry.js";
@@ -910,15 +910,28 @@ export async function prepareCliRunContext(
     });
     const contextEngine =
       resolvedContextEngine.info.id !== "legacy" ? resolvedContextEngine : undefined;
+    let contextEngineDegradedReason: string | undefined;
     if (contextEngine) {
-      assertContextEngineHostSupport({
-        contextEngine,
-        operation: "agent-run",
-        host: buildGenericCliContextEngineHostSupport({
-          backendId: backendResolved.id,
-          capabilities: backendResolved.contextEngineHostCapabilities,
-        }),
+      const contextEngineHost = buildGenericCliContextEngineHostSupport({
+        backendId: backendResolved.id,
+        capabilities: backendResolved.contextEngineHostCapabilities,
       });
+      const hostSupport = evaluateContextEngineHostSupport({
+        contextEngineInfo: contextEngine.info,
+        operation: "agent-run",
+        host: contextEngineHost,
+      });
+      if (!hostSupport.ok) {
+        // Degrade instead of failing the turn: the CLI runner only ever invokes
+        // bootstrap/after-turn/maintain, so hooks behind the missing
+        // capabilities never fire here and prompt assembly stays backend-native.
+        contextEngineDegradedReason = "runtime_unavailable";
+        cliBackendLog.warn(
+          `context engine "${contextEngine.info.id}" degraded on ${contextEngineHost.label}: ` +
+            `missing host capabilities: ${hostSupport.missingCapabilities.join(", ")}; ` +
+            `continuing with backend-native context assembly (supported: ${contextEngineHost.capabilities.join(", ")})`,
+        );
+      }
     }
     const hadSessionFile = await hasCliSessionTranscript({
       sessionId: params.sessionId,
@@ -947,6 +960,7 @@ export async function prepareCliRunContext(
       hadSessionFile,
       contextEngineConfig,
       contextEngine,
+      ...(contextEngineDegradedReason ? { contextEngineDegradedReason } : {}),
       contextEngineTurnPrompt,
       modelId,
       normalizedModel,

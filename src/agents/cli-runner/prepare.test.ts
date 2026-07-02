@@ -1550,17 +1550,24 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
     }
   });
 
-  it("rejects CLI runs for context engines that require pre-prompt assembly", async () => {
+  it("degrades CLI runs for context engines that require unsupported host capabilities", async () => {
     const { dir, sessionFile } = createSessionFile();
-    const engineId = `cli-unsupported-engine-${Date.now().toString(36)}`;
+    const engineId = `cli-degraded-engine-${Date.now().toString(36)}`;
     registerContextEngine(engineId, (): ContextEngine => {
       return {
         info: {
           id: engineId,
-          name: "CLI unsupported engine",
+          name: "CLI degraded engine",
           hostRequirements: {
             "agent-run": {
-              requiredCapabilities: ["assemble-before-prompt"],
+              requiredCapabilities: [
+                "bootstrap",
+                "assemble-before-prompt",
+                "after-turn",
+                "maintain",
+                "compact",
+                "runtime-llm-complete",
+              ],
               unsupportedMessage: "Use the native Codex or OpenClaw embedded runtime.",
             },
           },
@@ -1572,24 +1579,23 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
     });
 
     try {
-      await expect(
-        prepareCliRunContext({
-          sessionId: "session-test",
-          sessionFile,
-          workspaceDir: dir,
-          prompt: "latest ask",
-          provider: "test-cli",
-          model: "test-model",
-          timeoutMs: 1_000,
-          runId: "run-test-context-engine-host-compat",
-          config: {
-            ...createCliBackendConfig(),
-            plugins: { slots: { contextEngine: engineId } },
-          },
-        }),
-      ).rejects.toThrow(
-        `Context engine "${engineId}" cannot run operation "agent-run" on CLI backend "test-cli".`,
-      );
+      const context = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionFile,
+        workspaceDir: dir,
+        prompt: "latest ask",
+        provider: "test-cli",
+        model: "test-model",
+        timeoutMs: 1_000,
+        runId: "run-test-context-engine-host-compat",
+        config: {
+          ...createCliBackendConfig(),
+          plugins: { slots: { contextEngine: engineId } },
+        },
+      });
+
+      expect(context.contextEngine?.info.id).toBe(engineId);
+      expect(context.contextEngineDegradedReason).toBe("runtime_unavailable");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -1648,6 +1654,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
       });
 
       expect(context.contextEngine?.info.id).toBe(engineId);
+      expect(context.contextEngineDegradedReason).toBeUndefined();
       expect(context.contextEngineConfig).toBe(runtimeConfig);
       expect(context.params.config).toBe(runtimeConfig);
       expect(factory).toHaveBeenCalledWith(

@@ -248,6 +248,45 @@ describe("runPreparedCliAgent context engine lifecycle", () => {
     expect(dispose).not.toHaveBeenCalled();
   });
 
+  it("keeps supported lifecycle hooks for engines degraded by unmet host requirements", async () => {
+    const bootstrap = vi.fn<NonNullable<ContextEngine["bootstrap"]>>(async () => ({
+      bootstrapped: true,
+    }));
+    const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
+    const maintain = vi.fn<NonNullable<ContextEngine["maintain"]>>(async () =>
+      createMaintenanceResult(),
+    );
+    const contextEngine = createContextEngine({
+      info: {
+        id: "test-degraded-context-engine",
+        name: "Test degraded context engine",
+        hostRequirements: {
+          "agent-run": {
+            requiredCapabilities: ["assemble-before-prompt", "compact", "runtime-llm-complete"],
+          },
+        },
+      },
+      bootstrap,
+      afterTurn,
+      maintain,
+    });
+    const context = buildPreparedContext(contextEngine);
+    context.contextEngineDegradedReason = "runtime_unavailable";
+    const result = await runPreparedCliAgent(context);
+
+    expect(result.meta.agentMeta?.sessionId).toBe("external-cli-session-1");
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(bootstrap.mock.calls[0]?.[0]).toMatchObject({
+      runtimeSettings: {
+        runtime: { host: "openclaw", mode: "degraded" },
+        diagnostics: { degradedReason: "runtime_unavailable" },
+      },
+    });
+    expect(afterTurn).toHaveBeenCalledTimes(1);
+    expect(afterTurn.mock.calls[0]?.[0]?.messages).toHaveLength(4);
+    expect(maintain).toHaveBeenCalledTimes(2);
+  });
+
   it("does not synthesize a context-engine user turn for empty transcript prompts", async () => {
     const afterTurn = vi.fn<NonNullable<ContextEngine["afterTurn"]>>(async () => {});
     const dispose = vi.fn(async () => {});
