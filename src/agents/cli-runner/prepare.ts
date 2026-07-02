@@ -926,10 +926,13 @@ export async function prepareCliRunContext(
         // bootstrap/after-turn/maintain, so hooks behind the missing
         // capabilities never fire here and prompt assembly stays backend-native.
         contextEngineDegradedReason = "runtime_unavailable";
+        const guidance = hostSupport.requirements.unsupportedMessage
+          ? ` ${hostSupport.requirements.unsupportedMessage}`
+          : "";
         cliBackendLog.warn(
           `context engine "${contextEngine.info.id}" degraded on ${contextEngineHost.label}: ` +
             `missing host capabilities: ${hostSupport.missingCapabilities.join(", ")}; ` +
-            `continuing with backend-native context assembly (supported: ${contextEngineHost.capabilities.join(", ")})`,
+            `continuing with backend-native context assembly (supported: ${contextEngineHost.capabilities.join(", ")}).${guidance}`,
         );
       }
     }
