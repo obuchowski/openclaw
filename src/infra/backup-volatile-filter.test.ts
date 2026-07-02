@@ -24,6 +24,10 @@ describe("isVolatileBackupPath", () => {
     [`${stateDir}/tmp/pending.tmp`, true],
     [`${stateDir}/delivery-queue/pending.tmp`, true],
     [`${stateDir}/session-delivery-queue/pending.tmp`, true],
+    // volatile: transient lock files under state (qmd embed-sync churns these)
+    [`${stateDir}/qmd/embed.lock`, true],
+    [`${stateDir}/qmd/embed.lock.lock`, true],
+    [`${stateDir}/agents/main/qmd-write.lock.lock`, true],
 
     // non-volatile: session config, not jsonl/log
     [`${stateDir}/sessions/s-abc/meta.json`, false],

@@ -12,7 +12,7 @@ import path from "node:path";
  * partial tail of a live log has no restoration value.
  */
 
-const STATE_TRANSIENT_EXTENSIONS = new Set([".sock", ".pid", ".tmp"]);
+const STATE_TRANSIENT_EXTENSIONS = new Set([".sock", ".pid", ".tmp", ".lock"]);
 
 function normalizePosix(input: string): string {
   if (!input) {
@@ -75,7 +75,7 @@ type VolatileFilterPlan = {
  *   - `{stateDir}/cron/runs/**`/`*.{jsonl,log}`
  *   - `{stateDir}/logs/**`/`*.{jsonl,log}`
  *   - `{stateDir}/{delivery-queue,session-delivery-queue}/**`/`*.{json,delivered,tmp}`
- *   - `{stateDir}/**`/`*.{sock,pid,tmp}`
+ *   - `{stateDir}/**`/`*.{sock,pid,tmp,lock}`
  */
 export function isVolatileBackupPath(absolutePath: string, plan: VolatileFilterPlan): boolean {
   if (!absolutePath) {
