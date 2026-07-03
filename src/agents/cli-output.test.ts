@@ -15,6 +15,7 @@ import { createClaudeApiErrorFixture } from "./test-helpers/claude-api-error-fix
 describe("supportsCliJsonlToolEvents", () => {
   it.each([
     ["Claude provider", { command: "claude", output: "jsonl" as const }, "claude-cli", true],
+    ["Claude-min provider", { command: "claude", output: "jsonl" as const }, "claude-min", true],
     [
       "explicit Claude dialect",
       { command: "custom", output: "jsonl" as const, jsonlDialect: "claude-stream-json" as const },

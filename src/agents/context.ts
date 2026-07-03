@@ -330,7 +330,7 @@ function resolveDiscoveredAnthropicFixedContextWindow(model: ModelEntry): number
   }
   const inferredProvider = normalizeProviderId(normalized.slice(0, slash));
   const inferredModel = normalized.slice(slash + 1);
-  return inferredProvider === "claude-cli"
+  return inferredProvider === "claude-cli" || inferredProvider === "claude-min"
     ? resolveAnthropicFixedContextWindow(inferredProvider, inferredModel)
     : undefined;
 }

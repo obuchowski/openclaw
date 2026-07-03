@@ -169,7 +169,8 @@ function encodeAuthProfileEpochPart(
 
 function getLocalCliCredentialFingerprint(provider: string): string | undefined {
   switch (provider) {
-    case "claude-cli": {
+    case "claude-cli":
+    case "claude-min": {
       const credential = cliAuthEpochDeps.readClaudeCliCredentialsCached({
         ttlMs: 5000,
         allowKeychainPrompt: false,

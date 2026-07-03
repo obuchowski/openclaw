@@ -58,6 +58,7 @@ function addExternalCliRuntimeScope(out: Set<string>, value: string | undefined)
   const normalized = normalizeProviderId(value?.trim() ?? "");
   if (
     normalized === "claude-cli" ||
+    normalized === "claude-min" ||
     normalized === "codex" ||
     normalized === "codex-cli" ||
     normalized === "codex-app-server" ||

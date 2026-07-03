@@ -92,7 +92,8 @@ export type CliToolResultDelta = {
 };
 
 function isClaudeCliProvider(providerId: string): boolean {
-  return normalizeLowercaseStringOrEmpty(providerId) === "claude-cli";
+  const normalized = normalizeLowercaseStringOrEmpty(providerId);
+  return normalized === "claude-cli" || normalized === "claude-min";
 }
 
 function isGeminiCliProvider(providerId: string): boolean {

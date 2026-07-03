@@ -19,6 +19,7 @@ import {
 import { resolveBlockMessage } from "../plugins/hook-decision-types.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { isHeartbeatLifecycleRunKind } from "./bootstrap-mode.js";
+import { sanitizeAssistantVisibleText } from "../shared/text/assistant-visible-text.js";
 import type { CliOutput } from "./cli-output.js";
 import {
   attachCliMessagingDeliveryEvidence,
@@ -83,7 +84,8 @@ export function restoreCliRunnerTestDeps(): void {
 }
 
 function isClaudeCliProvider(provider: string): boolean {
-  return provider.trim().toLowerCase() === "claude-cli";
+  const normalized = provider.trim().toLowerCase();
+  return normalized === "claude-cli" || normalized === "claude-min";
 }
 
 function shouldRetryFreshCliSessionAfterFailover(params: {
@@ -883,11 +885,13 @@ export async function runPreparedCliAgent(
     bindingFlushOk?: boolean;
     assistantTranscriptOwned?: boolean;
   }): EmbeddedAgentRunResult => {
-    const text = resultParams.output.text?.trim();
     const rawText = resultParams.output.rawText?.trim();
+    const text = resultParams.output.text
+      ? sanitizeAssistantVisibleText(resultParams.output.text).trim()
+      : undefined;
     const sourceReplyMirror = resolveCliSourceReplyMirror(resultParams.output);
     const finalAssistantVisibleText = sourceReplyMirror.delivered
-      ? sourceReplyMirror.visibleText
+      ? sanitizeAssistantVisibleText(sourceReplyMirror.visibleText).trim()
       : text;
     const payloads =
       sourceReplyMirror.payloads.length > 0

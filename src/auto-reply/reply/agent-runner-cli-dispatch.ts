@@ -33,7 +33,8 @@ import { formatToolAggregate } from "../tool-meta.js";
 import { resolveAgentLifecycleTerminalMetadata } from "./agent-lifecycle-terminal.js";
 
 function isClaudeCliProvider(provider: string): boolean {
-  return normalizeLowercaseStringOrEmpty(provider) === "claude-cli";
+  const normalized = normalizeLowercaseStringOrEmpty(provider);
+  return normalized === "claude-cli" || normalized === "claude-min";
 }
 
 function shouldBridgeCliAssistantTextToReasoning(provider: string): boolean {

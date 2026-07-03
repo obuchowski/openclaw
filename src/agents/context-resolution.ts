@@ -148,12 +148,20 @@ export function resolveAnthropicFixedContextWindow(
 ): number | undefined {
   const modelId = resolveModelFamilyId(model);
   if (
-    (provider === "anthropic" || provider === "anthropic-vertex") &&
+    (provider === "anthropic" ||
+      provider === "anthropic-vertex" ||
+      provider === "claude-cli" ||
+      provider === "claude-min") &&
     modelId.startsWith("claude-fable-5")
   ) {
     return ANTHROPIC_FABLE_CONTEXT_TOKENS;
   }
-  if (provider !== "anthropic" && provider !== "anthropic-vertex" && provider !== "claude-cli") {
+  if (
+    provider !== "anthropic" &&
+    provider !== "anthropic-vertex" &&
+    provider !== "claude-cli" &&
+    provider !== "claude-min"
+  ) {
     return undefined;
   }
   if (!ANTHROPIC_GA_1M_MODEL_PREFIXES.some((prefix) => modelId.startsWith(prefix))) {

@@ -50,7 +50,8 @@ const CLI_IMAGE_SWEEP_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const sweptCliImageRoots = new Set<string>();
 
 function isClaudeCliProvider(providerId: string): boolean {
-  return normalizeOptionalLowercaseString(providerId) === "claude-cli";
+  const normalized = normalizeOptionalLowercaseString(providerId);
+  return normalized === "claude-cli" || normalized === "claude-min";
 }
 
 /** Enqueues a CLI run under a backend/session key to prevent unsafe overlap. */

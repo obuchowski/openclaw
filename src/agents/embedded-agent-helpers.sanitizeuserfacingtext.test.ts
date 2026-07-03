@@ -458,6 +458,26 @@ describe("sanitizeUserFacingText", () => {
     expect(sanitizeUserFacingText(input)).toBe("Checking.  Done.");
   });
 
+  it("strips orphan tool-payload closing tags after malformed function-call scaffolding", () => {
+    const input = [
+      "<function_calls>",
+      '<invoke name="memory_search">',
+      '<parameter name="query">Core facts</parameter>',
+      "</invoke>",
+      "</function_calls>",
+      "<function_response>",
+      "[]",
+      "</function_response>",
+      "</parameter>",
+      "</invoke>",
+      "</function_calls>",
+      "",
+      "MCP_RESULT=ok",
+    ].join("\n");
+
+    expect(sanitizeUserFacingText(input)).toBe("MCP_RESULT=ok");
+  });
+
   it("preserves literal tool-call tag examples in user-facing prose", () => {
     const input = "Use `<tool_call>` to describe the XML tag in docs.";
     expect(sanitizeUserFacingText(input)).toBe(input);

@@ -117,6 +117,11 @@ function sha256(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function isClaudeCliProvider(providerId: string): boolean {
+  const normalized = providerId.trim().toLowerCase();
+  return normalized === "claude-cli" || normalized === "claude-min";
+}
+
 /** Closes all live Claude CLI sessions and clears creation promises for tests. */
 export function resetClaudeLiveSessionsForTest(): void {
   for (const session of liveSessions.values()) {
@@ -169,7 +174,7 @@ export async function rotateClaudeLiveMcpCaptureKeyForContext(
 /** Returns whether a prepared backend context is eligible for Claude live stdio reuse. */
 export function shouldUseClaudeLiveSession(context: PreparedCliRunContext): boolean {
   return (
-    context.backendResolved.id === "claude-cli" &&
+    isClaudeCliProvider(context.backendResolved.id) &&
     context.preparedBackend.backend.liveSession === "claude-stdio" &&
     context.preparedBackend.backend.output === "jsonl" &&
     context.preparedBackend.backend.input === "stdin"

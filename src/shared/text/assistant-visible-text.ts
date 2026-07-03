@@ -41,6 +41,11 @@ const TOOL_CALL_TAG_NAMES = new Set([
   "tool_calls",
   "antml:invoke",
   "antml:parameter",
+  "invoke",
+  "parameter",
+  "parameters",
+  "argument",
+  "arguments",
 ]);
 const TOOL_CALL_JSON_PAYLOAD_START_RE =
   /^(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))*\s*(?:\r?\n\s*)?[[{]/;
