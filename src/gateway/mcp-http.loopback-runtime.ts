@@ -366,14 +366,24 @@ export function clearActiveMcpLoopbackRuntimeByOwnerToken(ownerToken: string): v
   }
 }
 
-/** Build the MCP server config injected into agents for loopback tool access. */
-export function createMcpLoopbackServerConfig(port: number) {
+/**
+ * Build the MCP server config injected into agents for loopback tool access.
+ *
+ * `alwaysLoad` defaults to true so Claude Code never defers loopback tools.
+ * Pass `{ alwaysLoad: false }` when tool deferral (MCP Tool Search) is wanted,
+ * e.g. when the backend env enables ENABLE_TOOL_SEARCH.
+ */
+export function createMcpLoopbackServerConfig(port: number, options?: { alwaysLoad?: boolean }) {
   return {
     mcpServers: {
       openclaw: {
         type: "http",
         url: `http://127.0.0.1:${port}/mcp`,
-        alwaysLoad: true,
+        // Claude Code keys off the PRESENCE of alwaysLoad, not its value:
+        // an explicit `alwaysLoad: false` still disables tool deferral.
+        // The key must be omitted entirely for MCP Tool Search to defer
+        // these tools (verified empirically on Claude Code 2.1.x).
+        ...(options?.alwaysLoad === false ? {} : { alwaysLoad: true }),
         headers: {
           Authorization: "Bearer ${OPENCLAW_MCP_TOKEN}",
           "x-session-key": "${OPENCLAW_MCP_SESSION_KEY}",
