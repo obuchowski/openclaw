@@ -285,10 +285,18 @@ export async function compactEmbeddedAgentSession(
       }).tokens,
     ) ?? DEFAULT_CONTEXT_TOKENS;
   const requestedContextTokenBudget = normalizeContextTokenBudget(params.contextTokenBudget);
-  const contextTokenBudget = Math.min(
-    requestedContextTokenBudget ?? resolvedContextTokenBudget,
-    resolvedContextTokenBudget,
-  );
+  // When local resolution fell through to the generic default (model unknown to
+  // this resolver, e.g. claude-cli lanes), the caller-supplied budget is strictly
+  // better information — clamping it down to the fallback fabricates impossible
+  // threshold targets (272k window treated as 128k).
+  const contextTokenBudget =
+    requestedContextTokenBudget !== undefined &&
+    resolvedContextTokenBudget === DEFAULT_CONTEXT_TOKENS
+      ? requestedContextTokenBudget
+      : Math.min(
+          requestedContextTokenBudget ?? resolvedContextTokenBudget,
+          resolvedContextTokenBudget,
+        );
   const contextEngineRuntimeContext = buildCompactionContextEngineRuntimeContext({
     params,
     agentDir,

@@ -148,7 +148,7 @@ export function resolveAnthropicFixedContextWindow(
 ): number | undefined {
   const modelId = resolveModelFamilyId(model);
   if (
-    (provider === "anthropic" || provider === "anthropic-vertex") &&
+    (provider === "anthropic" || provider === "anthropic-vertex" || provider === "claude-cli") &&
     modelId.startsWith("claude-fable-5")
   ) {
     return ANTHROPIC_FABLE_CONTEXT_TOKENS;
