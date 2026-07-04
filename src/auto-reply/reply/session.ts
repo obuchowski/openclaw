@@ -244,14 +244,32 @@ function resolveBoundConversationSessionKey(params: {
   return binding.targetSessionKey;
 }
 
+/**
+ * Bounded retry budget for optimistic reply-session initialization.
+ *
+ * The commit guard fingerprints the whole session-store entry, so any
+ * concurrent same-session writer (e.g. mid-turn CLI compaction, post-run
+ * usage updates) invalidates the snapshot. A single retry is not enough
+ * when the concurrent turn performs several writes back-to-back; losing
+ * the race silently drops the inbound turn's reply. Retry with a short
+ * jittered backoff so the loser re-reads the settled entry and reuses it.
+ */
+const REPLY_SESSION_INIT_MAX_ATTEMPTS = 5;
+const REPLY_SESSION_INIT_RETRY_BASE_DELAY_MS = 50;
+
+function replySessionInitRetryDelayMs(attempt: number): number {
+  const exponential = REPLY_SESSION_INIT_RETRY_BASE_DELAY_MS * 2 ** attempt;
+  return exponential + Math.floor(Math.random() * REPLY_SESSION_INIT_RETRY_BASE_DELAY_MS);
+}
+
 /** Initializes or reuses the reply session state for one inbound turn. */
 export async function initSessionState(params: InitSessionStateParams): Promise<SessionInitResult> {
-  return await initSessionStateAttempt(params, false);
+  return await initSessionStateAttempt(params, 0);
 }
 
 async function initSessionStateAttempt(
   params: InitSessionStateParams,
-  staleSnapshotRetried: boolean,
+  staleSnapshotAttempt: number,
 ): Promise<SessionInitResult> {
   const { ctx, cfg, commandAuthorized } = params;
   // Heartbeat, cron-event, and exec-event runs should NEVER trigger session
@@ -857,8 +875,14 @@ async function initSessionStateAttempt(
     storePath,
   });
   if (!committed.ok) {
-    if (!staleSnapshotRetried) {
-      return await initSessionStateAttempt(params, true);
+    if (staleSnapshotAttempt + 1 < REPLY_SESSION_INIT_MAX_ATTEMPTS) {
+      log.debug(
+        `reply session initialization snapshot stale for ${sessionKey}; retrying (attempt ${staleSnapshotAttempt + 1}/${REPLY_SESSION_INIT_MAX_ATTEMPTS})`,
+      );
+      await new Promise((resolve) =>
+        setTimeout(resolve, replySessionInitRetryDelayMs(staleSnapshotAttempt)),
+      );
+      return await initSessionStateAttempt(params, staleSnapshotAttempt + 1);
     }
     throw new Error(`reply session initialization conflicted for ${sessionKey}`);
   }
