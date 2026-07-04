@@ -402,13 +402,18 @@ const MCP_CONTEXT_HEADERS = {
   "x-openclaw-cli-capture-key": "${OPENCLAW_MCP_CLI_CAPTURE_KEY}",
 } as const;
 
-function createMcpServerConfig(port: number, headers: Record<string, string>) {
+function createMcpServerConfig(
+  port: number,
+  headers: Record<string, string>,
+  options?: { alwaysLoad?: boolean },
+) {
   return {
     mcpServers: {
       openclaw: {
         type: "http",
         url: `http://127.0.0.1:${port}/mcp`,
-        alwaysLoad: true,
+        // Claude Code keys off the presence of alwaysLoad, not its value.
+        ...(options?.alwaysLoad === false ? {} : { alwaysLoad: true }),
         headers,
       },
     },
@@ -416,8 +421,12 @@ function createMcpServerConfig(port: number, headers: Record<string, string>) {
 }
 
 /** Build the MCP server config injected into agents for loopback tool access. */
-export function createMcpLoopbackServerConfig(port: number) {
-  return createMcpServerConfig(port, { ...MCP_AUTH_HEADERS, ...MCP_CONTEXT_HEADERS });
+export function createMcpLoopbackServerConfig(port: number, options?: { alwaysLoad?: boolean }) {
+  return createMcpServerConfig(
+    port,
+    { ...MCP_AUTH_HEADERS, ...MCP_CONTEXT_HEADERS },
+    options,
+  );
 }
 
 export function createMcpAttachGrantServerConfig(port: number) {

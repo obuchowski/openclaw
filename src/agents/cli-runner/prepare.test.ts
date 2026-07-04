@@ -106,7 +106,7 @@ function wrappedPluginSystemContext(text: string): string {
   return `---\n\nOpenClaw plugin-injected system context. This block is not workspace file content.\n\n${text}\n\n---`;
 }
 
-function createTestMcpLoopbackServerConfig(port: number) {
+function createTestMcpLoopbackServerConfig(port: number, options?: { alwaysLoad?: boolean }) {
   // Mirrors the runtime loopback config shape so tests cover env placeholder
   // substitution without starting the real MCP HTTP server.
   return {
@@ -114,7 +114,8 @@ function createTestMcpLoopbackServerConfig(port: number) {
       openclaw: {
         type: "http",
         url: `http://127.0.0.1:${port}/mcp`,
-        alwaysLoad: true,
+        // Mirrors runtime: key omitted entirely when deferral is wanted.
+        ...(options?.alwaysLoad === false ? {} : { alwaysLoad: true }),
         headers: {
           Authorization: "Bearer ${OPENCLAW_MCP_TOKEN}",
           "x-session-key": "${OPENCLAW_MCP_SESSION_KEY}",

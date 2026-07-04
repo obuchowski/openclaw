@@ -169,6 +169,19 @@ function prependCliSessionDriftUserContext(
   };
 }
 
+/**
+ * Claude Code MCP Tool Search (ENABLE_TOOL_SEARCH): treat any value other than
+ * an explicit off switch ("", "0", "false", "off", "no") as enabling tool
+ * deferral, including "true", "auto", and "auto:N" threshold forms.
+ */
+function isToolSearchEnvEnabled(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return !["0", "false", "off", "no"].includes(normalized);
+}
+
 async function resolveCliSkillsPrompt(params: {
   agentId: string;
   config: RunCliAgentParams["config"];
@@ -575,7 +588,11 @@ export async function prepareCliRunContext(
       config: params.config,
       ...(crestodianMcpConfig ? { exclusiveConfig: crestodianMcpConfig } : {}),
       additionalConfig: mcpLoopbackRuntime
-        ? prepareDeps.createMcpLoopbackServerConfig(mcpLoopbackRuntime.port)
+        ? prepareDeps.createMcpLoopbackServerConfig(mcpLoopbackRuntime.port, {
+            // When the backend enables Claude Code MCP Tool Search, drop
+            // alwaysLoad so loopback tools participate in tool deferral.
+            alwaysLoad: !isToolSearchEnvEnabled(backendResolved.config.env?.ENABLE_TOOL_SEARCH),
+          })
         : undefined,
       env: mcpLoopbackRuntime
         ? {

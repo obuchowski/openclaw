@@ -2170,6 +2170,11 @@ describe("createMcpLoopbackServerConfig", () => {
     };
     expect(config.mcpServers?.openclaw?.url).toBe("http://127.0.0.1:23119/mcp");
     expect(config.mcpServers?.openclaw?.alwaysLoad).toBe(true);
+    const deferredConfig = createMcpLoopbackServerConfig(23119, { alwaysLoad: false }) as {
+      mcpServers?: Record<string, { alwaysLoad?: boolean }>;
+    };
+    // Key must be ABSENT (not false): Claude Code keys off presence.
+    expect("alwaysLoad" in (deferredConfig.mcpServers?.openclaw ?? {})).toBe(false);
     expect(config.mcpServers?.openclaw?.headers?.Authorization).toBe(
       "Bearer ${OPENCLAW_MCP_TOKEN}",
     );
