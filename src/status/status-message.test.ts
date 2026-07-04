@@ -233,4 +233,61 @@ describe("buildStatusMessage context window", () => {
     expect(text).not.toContain("check provider");
     expect(text).not.toContain("pinned session");
   });
+
+  it("caps a trusted runtime window with the authored agent contextTokens cap", () => {
+    cliBackendsTesting.setDepsForTest({
+      resolvePluginSetupCliBackend: ({ backend }) =>
+        backend === "claude-cli"
+          ? {
+              pluginId: "anthropic",
+              backend: {
+                id: "claude-cli",
+                modelProvider: "anthropic",
+                config: { command: "claude" },
+                bundleMcp: false,
+              },
+            }
+          : undefined,
+      resolvePluginSetupRegistry: () => {
+        throw new Error("setup registry should not load for a targeted runtime alias");
+      },
+      resolveRuntimeCliBackends: () => [],
+    });
+
+    const text = buildStatusMessage({
+      config: {
+        agents: {
+          defaults: {
+            cliBackends: {
+              "claude-cli": { command: "claude" },
+            },
+          },
+        },
+      },
+      agent: {
+        model: "anthropic/claude-fable-5",
+        contextTokens: 272_000,
+      },
+      explicitConfiguredContextTokens: 272_000,
+      runtimeContextTokens: 1_000_000,
+      sessionEntry: {
+        sessionId: "runtime-alias-configured-cap",
+        updatedAt: 0,
+        modelProvider: "claude-cli",
+        model: "claude-fable-5",
+        totalTokens: 60_000,
+        totalTokensFresh: true,
+        contextTokens: 272_000,
+      },
+      sessionKey: "agent:main:main",
+      sessionScope: "per-sender",
+      queue: { mode: "collect", depth: 0 },
+      modelAuth: "oauth",
+      activeModelAuth: "oauth",
+    });
+
+    expect(text).toContain("Model: anthropic/claude-fable-5");
+    expect(text).toContain("Context: 60k/272k");
+    expect(text).not.toContain("Context: 60k/1.0m");
+  });
 });

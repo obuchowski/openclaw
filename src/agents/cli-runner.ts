@@ -225,6 +225,40 @@ function buildCliContextEngineUserMessage(prompt: string): AgentMessage {
   } as AgentMessage;
 }
 
+/** Budget/live-count forwarding for context-engine turn finalization on CLI lanes. */
+function buildCliContextEngineBudgetParams(params: {
+  contextWindowTokens?: number;
+  usageTotal?: number;
+}):
+  | {
+      tokenBudget?: number;
+      runtimeContext: { tokenBudget?: number; currentTokenCount?: number };
+    }
+  | undefined {
+  const tokenBudget =
+    typeof params.contextWindowTokens === "number" &&
+    Number.isFinite(params.contextWindowTokens) &&
+    params.contextWindowTokens > 0
+      ? Math.floor(params.contextWindowTokens)
+      : undefined;
+  const currentTokenCount =
+    typeof params.usageTotal === "number" &&
+    Number.isFinite(params.usageTotal) &&
+    params.usageTotal > 0
+      ? Math.floor(params.usageTotal)
+      : undefined;
+  if (tokenBudget === undefined && currentTokenCount === undefined) {
+    return undefined;
+  }
+  return {
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    runtimeContext: {
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      ...(currentTokenCount !== undefined ? { currentTokenCount } : {}),
+    },
+  };
+}
+
 function buildCliContextEngineAssistantMessage(params: {
   text: string;
   provider: string;
@@ -398,6 +432,16 @@ async function finalizeCliContextEngineTurn(params: {
     contextEngineHostSupport,
     providerId: runParams.provider,
     modelId: context.modelId,
+    // CLI lanes must forward the resolved context window and the live token
+    // count the CLI reported for this turn, like the embedded runner does.
+    // Without the budget the context engine falls back to its 128k default;
+    // without currentTokenCount it estimates pressure from the raw message
+    // snapshot (the whole uncompacted history), wildly overstating the live
+    // context for threshold maintenance.
+    ...(buildCliContextEngineBudgetParams({
+      contextWindowTokens: context.contextWindowInfo?.tokens,
+      usageTotal: params.output.usage?.total,
+    }) ?? {}),
     runMaintenance: async (maintenanceParams) =>
       await runHarnessContextEngineMaintenance({
         ...maintenanceParams,

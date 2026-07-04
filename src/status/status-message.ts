@@ -736,10 +736,22 @@ export function buildStatusMessage(args: StatusArgs): string {
     model: selectedLookupModel,
     allowAsyncLoad: false,
   });
-  const explicitRuntimeContextTokens =
+  const explicitConfiguredContextTokens =
+    typeof args.explicitConfiguredContextTokens === "number" &&
+    args.explicitConfiguredContextTokens > 0
+      ? args.explicitConfiguredContextTokens
+      : undefined;
+  const runtimeContextTokensArg =
     typeof args.runtimeContextTokens === "number" && args.runtimeContextTokens > 0
       ? args.runtimeContextTokens
       : undefined;
+  // An authored agent-level contextTokens cap intentionally lowers a larger
+  // model window (resolveContextWindowInfo caps the live budget the same way),
+  // so a runtime-window snapshot must not report the raw window above it.
+  const explicitRuntimeContextTokens =
+    runtimeContextTokensArg !== undefined && explicitConfiguredContextTokens !== undefined
+      ? Math.min(runtimeContextTokensArg, explicitConfiguredContextTokens)
+      : runtimeContextTokensArg;
   const resolvedActiveContextTokens = resolveContextTokensForModel({
     cfg: contextConfig,
     ...(contextLookupProvider ? { provider: contextLookupProvider } : {}),
@@ -787,11 +799,6 @@ export function buildStatusMessage(args: StatusArgs): string {
   const agentContextTokens =
     typeof args.agent?.contextTokens === "number" && args.agent.contextTokens > 0
       ? args.agent.contextTokens
-      : undefined;
-  const explicitConfiguredContextTokens =
-    typeof args.explicitConfiguredContextTokens === "number" &&
-    args.explicitConfiguredContextTokens > 0
-      ? args.explicitConfiguredContextTokens
       : undefined;
   const cappedConfiguredContextTokens =
     typeof explicitConfiguredContextTokens === "number"
