@@ -282,6 +282,15 @@ function resolveBoundConversationSessionKey(params: {
   return binding.targetSessionKey;
 }
 
+/** Bounded retry budget for optimistic reply-session initialization. */
+const REPLY_SESSION_INIT_MAX_ATTEMPTS = 5;
+const REPLY_SESSION_INIT_RETRY_BASE_DELAY_MS = 50;
+
+function replySessionInitRetryDelayMs(attempt: number): number {
+  const exponential = REPLY_SESSION_INIT_RETRY_BASE_DELAY_MS * 2 ** attempt;
+  return exponential + Math.floor(Math.random() * REPLY_SESSION_INIT_RETRY_BASE_DELAY_MS);
+}
+
 function resolveInitSessionStateAttemptContext(
   params: InitSessionStateParams,
 ): InitSessionStateAttemptContext {
@@ -322,12 +331,12 @@ function resolveInitSessionStateAttemptContext(
 
 /** Initializes or reuses the reply session state for one inbound turn. */
 export async function initSessionState(params: InitSessionStateParams): Promise<SessionInitResult> {
-  return await initSessionStateAttempt(params, false);
+  return await initSessionStateAttempt(params, 0);
 }
 
 async function initSessionStateAttempt(
   params: InitSessionStateParams,
-  staleSnapshotRetried: boolean,
+  staleSnapshotAttempt: number,
 ): Promise<SessionInitResult> {
   const attemptContext = resolveInitSessionStateAttemptContext(params);
   // Guarded revision checks only serialize correctly when the snapshot and
@@ -335,7 +344,7 @@ async function initSessionStateAttempt(
   const attempt = await runExclusiveSessionStoreWrite(
     attemptContext.storePath,
     async () =>
-      await initSessionStateAttemptLocked(params, attemptContext, staleSnapshotRetried, undefined),
+      await initSessionStateAttemptLocked(params, attemptContext, staleSnapshotAttempt, undefined),
   );
   if (attempt.kind === "complete") {
     return attempt.result;
@@ -357,7 +366,7 @@ async function initSessionStateAttempt(
         // before interrupting, then reacquire any refreshed identity first.
         const revalidated = await runExclusiveSessionStoreWrite(
           attemptContext.storePath,
-          async () => await initSessionStateAttemptLocked(params, attemptContext, false, undefined),
+          async () => await initSessionStateAttemptLocked(params, attemptContext, 0, undefined),
         );
         if (
           revalidated.kind === "complete" ||
@@ -386,7 +395,7 @@ async function initSessionStateAttempt(
         // must match this exact fenced identity before any rollover side effect.
         return await runExclusiveSessionStoreWrite(
           attemptContext.storePath,
-          async () => await initSessionStateAttemptLocked(params, attemptContext, false, candidate),
+          async () => await initSessionStateAttemptLocked(params, attemptContext, 0, candidate),
         );
       },
     });
@@ -400,7 +409,7 @@ async function initSessionStateAttempt(
 async function initSessionStateAttemptLocked(
   params: InitSessionStateParams,
   attemptContext: InitSessionStateAttemptContext,
-  staleSnapshotRetried: boolean,
+  staleSnapshotAttempt: number,
   lifecycleMutationIdentity: { sessionId: string; sessionKey: string } | undefined,
 ): Promise<InitSessionStateAttemptOutcome> {
   const { ctx, cfg, commandAuthorized } = params;
@@ -1026,8 +1035,19 @@ async function initSessionStateAttemptLocked(
     storePath,
   });
   if (!committed.ok) {
-    if (!staleSnapshotRetried) {
-      return await initSessionStateAttemptLocked(params, attemptContext, true, undefined);
+    if (staleSnapshotAttempt + 1 < REPLY_SESSION_INIT_MAX_ATTEMPTS) {
+      log.debug(
+        `reply session initialization snapshot stale for ${sessionKey}; retrying (attempt ${staleSnapshotAttempt + 1}/${REPLY_SESSION_INIT_MAX_ATTEMPTS})`,
+      );
+      await new Promise((resolve) =>
+        setTimeout(resolve, replySessionInitRetryDelayMs(staleSnapshotAttempt)),
+      );
+      return await initSessionStateAttemptLocked(
+        params,
+        attemptContext,
+        staleSnapshotAttempt + 1,
+        undefined,
+      );
     }
     throw new Error(`reply session initialization conflicted for ${sessionKey}`);
   }
