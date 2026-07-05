@@ -1,8 +1,10 @@
 /**
  * Top-level CLI-backed agent runner orchestration.
  */
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { setReplyPayloadMetadata, type ReplyPayload } from "../auto-reply/reply-payload.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import { updateSessionEntry } from "../config/sessions/session-accessor.js";
 import { appendExactAssistantMessageToSessionTranscript } from "../config/sessions/transcript.js";
 import { buildGenericCliContextEngineHostSupport } from "../context-engine/host-compat.js";
 import {
@@ -35,6 +37,7 @@ import type {
   PreparedCliRunContext,
   RunCliAgentParams,
 } from "./cli-runner/types.js";
+import { clearCliSession, getCliSessionBinding } from "./cli-session.js";
 import { claudeCliSessionTranscriptHasContent as claudeCliSessionTranscriptHasContentImpl } from "./command/attempt-execution.helpers.js";
 import { classifyFailoverReason, isFailoverErrorMessage } from "./embedded-agent-helpers.js";
 import type { EmbeddedAgentRunResult } from "./embedded-agent-runner.js";
@@ -383,6 +386,90 @@ async function persistCliAssistantTranscript(params: {
   }
 }
 
+/**
+ * Automatic-path mirror of the manual `/compact` reseed bridge
+ * (commands-compact.ts, dogfood 91ac9681e7 + 0dbfb1a5a4).
+ *
+ * afterTurn budget compaction shrinks the STORED transcript, but the live
+ * native CLI session keeps its own growing transcript and only picks up the
+ * compacted OpenClaw history when it reseeds — resolveCliSessionReuse has no
+ * compaction-based invalidation. When the CLI-reported live usage for this turn
+ * already exceeds the resolved context-window budget, drop the CLI session
+ * binding so the next turn rebuilds the backend session from the compacted
+ * history. Self-limiting: once reseeded, usage drops below budget and no
+ * further clears happen; a marathon turn that exceeds budget again may clear
+ * again, which is acceptable. No-op when either value is unknown or not > 0.
+ * Never throws — a failed clear must not fail the turn.
+ */
+export async function reseedCliSessionIfOverBudget(params: {
+  context: PreparedCliRunContext;
+  usageTotal?: number;
+}): Promise<void> {
+  const { context } = params;
+  const { params: runParams } = context;
+  try {
+    const budget = context.contextWindowInfo?.tokens;
+    const usage = params.usageTotal;
+    if (
+      typeof budget !== "number" ||
+      !Number.isFinite(budget) ||
+      budget <= 0 ||
+      typeof usage !== "number" ||
+      !Number.isFinite(usage) ||
+      usage <= 0 ||
+      usage <= budget
+    ) {
+      return;
+    }
+    const sessionEntry = runParams.sessionEntry;
+    const sessionKey = runParams.sessionKey;
+    if (!sessionEntry || !sessionKey) {
+      return;
+    }
+    // The run's display provider and the session entry's modelProvider can
+    // disagree (display provider "anthropic" vs binding key "claude-cli") — probe
+    // both before concluding there is no CLI binding to reseed (per 0dbfb1a5a4).
+    const bindingProviderCandidates = [
+      normalizeOptionalString(runParams.provider),
+      normalizeOptionalString(sessionEntry.modelProvider),
+    ].filter((value): value is string => value !== undefined);
+    const bindingProvider = bindingProviderCandidates.find(
+      (candidate) => getCliSessionBinding(sessionEntry, candidate) !== undefined,
+    );
+    if (!bindingProvider) {
+      return;
+    }
+    const now = Date.now();
+    clearCliSession(sessionEntry, bindingProvider);
+    sessionEntry.updatedAt = now;
+    if (runParams.storePath) {
+      await updateSessionEntry(
+        {
+          storePath: runParams.storePath,
+          sessionKey,
+        },
+        (entry) => {
+          const next = { ...entry };
+          clearCliSession(next, bindingProvider);
+          return {
+            cliSessionBindings: next.cliSessionBindings,
+            cliSessionIds: next.cliSessionIds,
+            claudeCliSessionId: next.claudeCliSessionId,
+            updatedAt: now,
+          };
+        },
+      );
+    }
+    log.info(
+      `cli session over budget after turn (usage=${Math.floor(usage)} > budget=${Math.floor(
+        budget,
+      )}); clearing CLI binding to reseed from compacted history (provider=${bindingProvider} sessionKey=${sessionKey})`,
+    );
+  } catch (error) {
+    log.warn(`cli session over-budget reseed skipped: ${formatErrorMessage(error)}`);
+  }
+}
+
 async function finalizeCliContextEngineTurn(params: {
   context: PreparedCliRunContext;
   historyMessages: unknown[];
@@ -454,6 +541,13 @@ async function finalizeCliContextEngineTurn(params: {
   if (result.postTurnFinalizationSucceeded && deferredTurnMaintenance) {
     context.contextEngineDeferredTurnMaintenance = deferredTurnMaintenance;
   }
+  // Mirror the manual /compact reseed bridge: if the CLI-reported live usage for
+  // this turn exceeds the resolved context window, drop the CLI session binding
+  // so the next turn rebuilds the backend session from the compacted history.
+  await reseedCliSessionIfOverBudget({
+    context,
+    usageTotal: params.output.usage?.total,
+  });
 }
 
 /** Prepares and runs one CLI-backed agent turn. */
