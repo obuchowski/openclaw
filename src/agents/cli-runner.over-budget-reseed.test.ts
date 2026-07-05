@@ -84,11 +84,37 @@ describe("reseedCliSessionIfOverBudget", () => {
       storePath,
     });
 
-    await reseedCliSessionIfOverBudget({ context, usageTotal: 408542 });
+    await reseedCliSessionIfOverBudget({ context, usage: { total: 408542 } });
 
     // Overwrite-proof signal for the authoritative post-run store write.
     expect(context.reseedCliBindingOverBudget).toBe(true);
     // Belt-and-suspenders in-store clear happened too.
+    const persisted = loadSessionStore(storePath, { skipCache: true })[sessionKey];
+    expect(getCliSessionBinding(persisted!, "claude-cli")).toBeUndefined();
+  });
+
+  it("fires from usage components when usage.total is absent (Claude stream-json)", async () => {
+    // Real Claude stream-json result events omit total_tokens; the live prompt
+    // footprint is input + cacheRead + cacheWrite (cache-read dominates on a
+    // resumed session). 30000 + 410000 + 5000 = 445000 > 272000 budget.
+    const sessionKey = "agent:main";
+    const entry = makeSessionEntry();
+    setCliSessionBinding(entry, "claude-cli", { sessionId: "cli-comp", authEpochVersion: 1 });
+    await seedStore(sessionKey, entry);
+
+    const context = makeContext({
+      budget: 272000,
+      provider: "claude-cli",
+      sessionKey,
+      storePath,
+    });
+
+    await reseedCliSessionIfOverBudget({
+      context,
+      usage: { input: 30000, cacheRead: 410000, cacheWrite: 5000 },
+    });
+
+    expect(context.reseedCliBindingOverBudget).toBe(true);
     const persisted = loadSessionStore(storePath, { skipCache: true })[sessionKey];
     expect(getCliSessionBinding(persisted!, "claude-cli")).toBeUndefined();
   });
@@ -108,7 +134,7 @@ describe("reseedCliSessionIfOverBudget", () => {
       storePath,
     });
 
-    await reseedCliSessionIfOverBudget({ context, usageTotal: 300000 });
+    await reseedCliSessionIfOverBudget({ context, usage: { total: 300000 } });
 
     expect(context.reseedCliBindingOverBudget).toBe(true);
     const persisted = loadSessionStore(storePath, { skipCache: true })[sessionKey];
@@ -129,7 +155,7 @@ describe("reseedCliSessionIfOverBudget", () => {
       storePath,
     });
 
-    await reseedCliSessionIfOverBudget({ context, usageTotal: 500000 });
+    await reseedCliSessionIfOverBudget({ context, usage: { total: 500000 } });
 
     expect(getCliSessionBinding(entry, "claude-cli")).toBeUndefined();
     const persisted = loadSessionStore(storePath, { skipCache: true })[sessionKey];
@@ -150,7 +176,7 @@ describe("reseedCliSessionIfOverBudget", () => {
       storePath,
     });
 
-    await reseedCliSessionIfOverBudget({ context, usageTotal: 200000 });
+    await reseedCliSessionIfOverBudget({ context, usage: { total: 200000 } });
 
     expect(context.reseedCliBindingOverBudget).toBeUndefined();
     expect(getCliSessionBinding(entry, "claude-cli")?.sessionId).toBe("cli-keep");
@@ -170,11 +196,11 @@ describe("reseedCliSessionIfOverBudget", () => {
       storePath,
     });
 
-    await reseedCliSessionIfOverBudget({ context, usageTotal: 0 });
+    await reseedCliSessionIfOverBudget({ context, usage: { total: 0 } });
     expect(context.reseedCliBindingOverBudget).toBeUndefined();
     expect(getCliSessionBinding(entry, "claude-cli")?.sessionId).toBe("cli-keep");
 
-    await reseedCliSessionIfOverBudget({ context, usageTotal: undefined });
+    await reseedCliSessionIfOverBudget({ context, usage: undefined });
     expect(context.reseedCliBindingOverBudget).toBeUndefined();
     expect(getCliSessionBinding(entry, "claude-cli")?.sessionId).toBe("cli-keep");
   });
@@ -192,7 +218,7 @@ describe("reseedCliSessionIfOverBudget", () => {
       storePath,
     });
 
-    await reseedCliSessionIfOverBudget({ context, usageTotal: 999999 });
+    await reseedCliSessionIfOverBudget({ context, usage: { total: 999999 } });
 
     expect(context.reseedCliBindingOverBudget).toBeUndefined();
     expect(getCliSessionBinding(entry, "claude-cli")?.sessionId).toBe("cli-keep");
@@ -212,7 +238,7 @@ describe("reseedCliSessionIfOverBudget", () => {
     });
 
     await expect(
-      reseedCliSessionIfOverBudget({ context, usageTotal: 999999 }),
+      reseedCliSessionIfOverBudget({ context, usage: { total: 999999 } }),
     ).resolves.toBeUndefined();
     expect(context.reseedCliBindingOverBudget).toBeUndefined();
   });

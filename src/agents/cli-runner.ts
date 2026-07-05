@@ -21,7 +21,8 @@ import {
 import { resolveBlockMessage } from "../plugins/hook-decision-types.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { isHeartbeatLifecycleRunKind } from "./bootstrap-mode.js";
-import type { CliOutput } from "./cli-output.js";
+import type { CliOutput, CliUsage } from "./cli-output.js";
+import { deriveCliUsageFootprint } from "./cli-output.js";
 import {
   attachCliMessagingDeliveryEvidence,
   getCliMessagingDeliveryEvidence,
@@ -232,7 +233,7 @@ function buildCliContextEngineUserMessage(prompt: string): AgentMessage {
 /** Budget/live-count forwarding for context-engine turn finalization on CLI lanes. */
 function buildCliContextEngineBudgetParams(params: {
   contextWindowTokens?: number;
-  usageTotal?: number;
+  usage?: CliUsage;
 }):
   | {
       tokenBudget?: number;
@@ -245,12 +246,11 @@ function buildCliContextEngineBudgetParams(params: {
     params.contextWindowTokens > 0
       ? Math.floor(params.contextWindowTokens)
       : undefined;
-  const currentTokenCount =
-    typeof params.usageTotal === "number" &&
-    Number.isFinite(params.usageTotal) &&
-    params.usageTotal > 0
-      ? Math.floor(params.usageTotal)
-      : undefined;
+  // Feed the engine the same live footprint the over-budget reseed bridge uses,
+  // derived from the CLI usage components (usage.total is absent on Claude
+  // stream-json turns). Without this the engine received undefined and estimated
+  // pressure from the raw, uncompacted message snapshot.
+  const currentTokenCount = deriveCliUsageFootprint(params.usage);
   if (tokenBudget === undefined && currentTokenCount === undefined) {
     return undefined;
   }
@@ -404,7 +404,7 @@ async function persistCliAssistantTranscript(params: {
  */
 export async function reseedCliSessionIfOverBudget(params: {
   context: PreparedCliRunContext;
-  usageTotal?: number;
+  usage?: CliUsage;
 }): Promise<void> {
   const { context } = params;
   const { params: runParams } = context;
@@ -412,16 +412,19 @@ export async function reseedCliSessionIfOverBudget(params: {
   try {
     const budget = context.contextWindowInfo?.tokens;
     // Use the same live token count the context engine used for its own compact
-    // decision this turn (currentTokenCount derived from usage.total). If usage
-    // reporting is unreliable this turn we cannot make a safe over-budget call,
-    // so we decline loudly rather than silently.
-    const usage = deriveCliCurrentTokenCount(params.usageTotal);
+    // decision this turn (currentTokenCount derived from the CLI usage
+    // components). Claude stream-json result events omit usage.total, so we sum
+    // the prompt-side footprint (input + cacheRead + cacheWrite) — cache-read
+    // dominates on resumed sessions. If usage reporting is entirely absent this
+    // turn we cannot make a safe over-budget call, so we decline loudly rather
+    // than silently.
+    const usage = deriveCliUsageFootprint(params.usage);
     if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
       logOverBudgetReseedSkip("no-budget", { sessionKey, budget, usage });
       return;
     }
     if (usage === undefined) {
-      logOverBudgetReseedSkip("no-usage", { sessionKey, budget, usage: params.usageTotal });
+      logOverBudgetReseedSkip("no-usage", { sessionKey, budget, usage });
       return;
     }
     if (usage <= budget) {
@@ -499,17 +502,6 @@ export async function reseedCliSessionIfOverBudget(params: {
 }
 
 /**
- * Derive the live token count for the over-budget decision the same way the
- * context engine does (buildCliContextEngineBudgetParams → currentTokenCount):
- * accept only a finite positive usage.total; anything else is "unknown".
- */
-function deriveCliCurrentTokenCount(usageTotal?: number): number | undefined {
-  return typeof usageTotal === "number" && Number.isFinite(usageTotal) && usageTotal > 0
-    ? Math.floor(usageTotal)
-    : undefined;
-}
-
-/**
  * Log, at info level, why the over-budget reseed bridge evaluated but declined.
  * Silence here is what made the production regression invisible, so every
  * decline path is now observable.
@@ -584,7 +576,7 @@ async function finalizeCliContextEngineTurn(params: {
     // context for threshold maintenance.
     ...(buildCliContextEngineBudgetParams({
       contextWindowTokens: context.contextWindowInfo?.tokens,
-      usageTotal: params.output.usage?.total,
+      usage: params.output.usage,
     }) ?? {}),
     runMaintenance: async (maintenanceParams) =>
       await runHarnessContextEngineMaintenance({
@@ -603,7 +595,7 @@ async function finalizeCliContextEngineTurn(params: {
   // so the next turn rebuilds the backend session from the compacted history.
   await reseedCliSessionIfOverBudget({
     context,
-    usageTotal: params.output.usage?.total,
+    usage: params.output.usage,
   });
 }
 
