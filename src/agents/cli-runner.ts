@@ -4,7 +4,7 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { setReplyPayloadMetadata, type ReplyPayload } from "../auto-reply/reply-payload.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
-import { updateSessionEntry } from "../config/sessions/session-accessor.js";
+import { loadSessionStore } from "../config/sessions/store-load.js";
 import { appendExactAssistantMessageToSessionTranscript } from "../config/sessions/transcript.js";
 import { buildGenericCliContextEngineHostSupport } from "../context-engine/host-compat.js";
 import {
@@ -39,6 +39,7 @@ import type {
 } from "./cli-runner/types.js";
 import { clearCliSession, getCliSessionBinding } from "./cli-session.js";
 import { claudeCliSessionTranscriptHasContent as claudeCliSessionTranscriptHasContentImpl } from "./command/attempt-execution.helpers.js";
+import { clearCliSessionInStore } from "./command/session-store.js";
 import { classifyFailoverReason, isFailoverErrorMessage } from "./embedded-agent-helpers.js";
 import type { EmbeddedAgentRunResult } from "./embedded-agent-runner.js";
 import { waitForDeferredTurnMaintenanceForSession } from "./embedded-agent-runner/context-engine-maintenance.js";
@@ -407,58 +408,85 @@ export async function reseedCliSessionIfOverBudget(params: {
 }): Promise<void> {
   const { context } = params;
   const { params: runParams } = context;
+  const sessionKey = runParams.sessionKey;
   try {
     const budget = context.contextWindowInfo?.tokens;
-    const usage = params.usageTotal;
-    if (
-      typeof budget !== "number" ||
-      !Number.isFinite(budget) ||
-      budget <= 0 ||
-      typeof usage !== "number" ||
-      !Number.isFinite(usage) ||
-      usage <= 0 ||
-      usage <= budget
-    ) {
+    // Use the same live token count the context engine used for its own compact
+    // decision this turn (currentTokenCount derived from usage.total). If usage
+    // reporting is unreliable this turn we cannot make a safe over-budget call,
+    // so we decline loudly rather than silently.
+    const usage = deriveCliCurrentTokenCount(params.usageTotal);
+    if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
+      logOverBudgetReseedSkip("no-budget", { sessionKey, budget, usage });
       return;
     }
-    const sessionEntry = runParams.sessionEntry;
-    const sessionKey = runParams.sessionKey;
-    if (!sessionEntry || !sessionKey) {
+    if (usage === undefined) {
+      logOverBudgetReseedSkip("no-usage", { sessionKey, budget, usage: params.usageTotal });
       return;
     }
-    // The run's display provider and the session entry's modelProvider can
-    // disagree (display provider "anthropic" vs binding key "claude-cli") — probe
-    // both before concluding there is no CLI binding to reseed (per 0dbfb1a5a4).
+    if (usage <= budget) {
+      logOverBudgetReseedSkip("under-budget", { sessionKey, budget, usage });
+      return;
+    }
+    if (!sessionKey) {
+      logOverBudgetReseedSkip("no-session-key", { sessionKey, budget, usage });
+      return;
+    }
+
+    // Operate on the STORE, not runParams.sessionEntry: on the normal
+    // reply-dispatch path sessionEntry is frequently undefined, and even when
+    // present the authoritative post-run store write (persistSessionUsageUpdate /
+    // updateSessionStoreAfterAgentRun) re-records the live binding after this
+    // helper runs. Load the current persisted entry so provider probing and the
+    // clear both see the same data the outer write will mutate.
+    const storeSnapshot = runParams.storePath
+      ? loadSessionStore(runParams.storePath, { skipCache: true })
+      : undefined;
+    const storeEntry = storeSnapshot?.[sessionKey];
+    // Probe display provider, the persisted entry's modelProvider, and the
+    // in-memory runParams entry's modelProvider — the run's display provider and
+    // the binding key can disagree (display "anthropic" vs key "claude-cli", per
+    // 0dbfb1a5a4).
     const bindingProviderCandidates = [
       normalizeOptionalString(runParams.provider),
-      normalizeOptionalString(sessionEntry.modelProvider),
+      normalizeOptionalString(storeEntry?.modelProvider),
+      normalizeOptionalString(runParams.sessionEntry?.modelProvider),
     ].filter((value): value is string => value !== undefined);
-    const bindingProvider = bindingProviderCandidates.find(
-      (candidate) => getCliSessionBinding(sessionEntry, candidate) !== undefined,
-    );
+    const probeEntry = storeEntry ?? runParams.sessionEntry;
+    const bindingProvider = probeEntry
+      ? bindingProviderCandidates.find(
+          (candidate) => getCliSessionBinding(probeEntry, candidate) !== undefined,
+        )
+      : undefined;
     if (!bindingProvider) {
+      logOverBudgetReseedSkip("no-binding", { sessionKey, budget, usage });
       return;
     }
+
+    // Signal the authoritative post-run store write to drop the binding as its
+    // last action. This is what makes the reseed overwrite-proof: that outer
+    // write is the final writer for this turn's binding, so clearing there cannot
+    // be clobbered by it re-recording the live session id (unlike an in-store
+    // clear here, which the outer write would overwrite).
+    context.reseedCliBindingOverBudget = true;
+
     const now = Date.now();
-    clearCliSession(sessionEntry, bindingProvider);
-    sessionEntry.updatedAt = now;
-    if (runParams.storePath) {
-      await updateSessionEntry(
-        {
-          storePath: runParams.storePath,
-          sessionKey,
-        },
-        (entry) => {
-          const next = { ...entry };
-          clearCliSession(next, bindingProvider);
-          return {
-            cliSessionBindings: next.cliSessionBindings,
-            cliSessionIds: next.cliSessionIds,
-            claudeCliSessionId: next.claudeCliSessionId,
-            updatedAt: now,
-          };
-        },
-      );
+    // Belt-and-suspenders in-store clear: keeps any in-memory sessionEntry and
+    // the persisted store coherent immediately, and covers callers that do not
+    // route through the post-run store write. Use clearCliSessionInStore (the
+    // same raw keyed helper the preflight compaction path uses) so the probe and
+    // the clear operate on the identical sessionStore[sessionKey] row.
+    if (runParams.sessionEntry) {
+      clearCliSession(runParams.sessionEntry, bindingProvider);
+      runParams.sessionEntry.updatedAt = now;
+    }
+    if (runParams.storePath && storeSnapshot) {
+      await clearCliSessionInStore({
+        provider: bindingProvider,
+        sessionKey,
+        sessionStore: storeSnapshot,
+        storePath: runParams.storePath,
+      });
     }
     log.info(
       `cli session over budget after turn (usage=${Math.floor(usage)} > budget=${Math.floor(
@@ -468,6 +496,35 @@ export async function reseedCliSessionIfOverBudget(params: {
   } catch (error) {
     log.warn(`cli session over-budget reseed skipped: ${formatErrorMessage(error)}`);
   }
+}
+
+/**
+ * Derive the live token count for the over-budget decision the same way the
+ * context engine does (buildCliContextEngineBudgetParams → currentTokenCount):
+ * accept only a finite positive usage.total; anything else is "unknown".
+ */
+function deriveCliCurrentTokenCount(usageTotal?: number): number | undefined {
+  return typeof usageTotal === "number" && Number.isFinite(usageTotal) && usageTotal > 0
+    ? Math.floor(usageTotal)
+    : undefined;
+}
+
+/**
+ * Log, at info level, why the over-budget reseed bridge evaluated but declined.
+ * Silence here is what made the production regression invisible, so every
+ * decline path is now observable.
+ */
+function logOverBudgetReseedSkip(
+  reason: "no-budget" | "no-usage" | "under-budget" | "no-session-key" | "no-binding",
+  info: { sessionKey?: string; budget?: number; usage?: number },
+): void {
+  log.info(
+    `cli session over-budget reseed skipped (reason=${reason} usage=${
+      typeof info.usage === "number" ? Math.floor(info.usage) : "unknown"
+    } budget=${
+      typeof info.budget === "number" ? Math.floor(info.budget) : "unknown"
+    } sessionKey=${info.sessionKey ?? "unknown"})`,
+  );
 }
 
 async function finalizeCliContextEngineTurn(params: {
@@ -1070,13 +1127,18 @@ export async function runPreparedCliAgent(
     if (resultParams.output.didSendViaMessagingTool) {
       deliveredMessagingSideEffect = true;
     }
+    // The over-budget reseed bridge decided to drop the binding this turn. Force
+    // the authoritative post-run store write to clear it (as its last action) and
+    // suppress any binding record here, so the clear is overwrite-proof.
+    const reseedOverBudget = context.reseedCliBindingOverBudget === true;
     const unflushedCliSessionId =
-      resultParams.effectiveCliSessionId && resultParams.bindingFlushOk === false
+      !reseedOverBudget &&
+      resultParams.effectiveCliSessionId &&
+      resultParams.bindingFlushOk === false
         ? resultParams.effectiveCliSessionId
         : undefined;
-    const persistedCliSessionId = unflushedCliSessionId
-      ? undefined
-      : resultParams.effectiveCliSessionId;
+    const persistedCliSessionId =
+      unflushedCliSessionId || reseedOverBudget ? undefined : resultParams.effectiveCliSessionId;
     const createdReseedReceipt =
       persistedCliSessionId &&
       resultParams.usedHistoryPrompt &&
@@ -1098,9 +1160,10 @@ export async function runPreparedCliAgent(
         ? params.cliSessionBinding.reseedReceipt
         : undefined;
     const reseedReceipt = createdReseedReceipt ?? preservedReseedReceipt;
-    const agentSessionId = unflushedCliSessionId
-      ? ""
-      : (resultParams.effectiveCliSessionId ?? params.sessionId ?? "");
+    const agentSessionId =
+      unflushedCliSessionId || reseedOverBudget
+        ? ""
+        : (resultParams.effectiveCliSessionId ?? params.sessionId ?? "");
     const yielded = resultParams.output.yielded === true;
     const stopReason = yielded ? "end_turn" : "completed";
 
@@ -1176,7 +1239,7 @@ export async function runPreparedCliAgent(
                 },
               }
             : {}),
-          ...(unflushedCliSessionId ? { clearCliSessionBinding: true } : {}),
+          ...(unflushedCliSessionId || reseedOverBudget ? { clearCliSessionBinding: true } : {}),
         },
       },
       ...(resultParams.output.didSendViaMessagingTool ? { didSendViaMessagingTool: true } : {}),

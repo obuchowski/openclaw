@@ -217,6 +217,15 @@ export type PreparedCliRunContext = {
   authEpoch?: string;
   authEpochVersion: number;
   extraSystemPromptHash?: string;
+  /**
+   * Set by the over-budget reseed bridge (reseedCliSessionIfOverBudget) when the
+   * live usage for this turn exceeded the resolved context window and the CLI
+   * binding must be dropped so the next turn rebuilds from compacted history.
+   * Consumed by buildCliRunResult, which forwards `clearCliSessionBinding: true`
+   * to the authoritative post-run store write so the clear cannot be overwritten
+   * by that same write re-recording the live session id.
+   */
+  reseedCliBindingOverBudget?: boolean;
   messageToolPolicyHash?: string;
   promptToolNamesHash?: string;
   cwdHash?: string;
