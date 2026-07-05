@@ -13,13 +13,46 @@ import type {
   MessagingToolSourceReplyPayload,
 } from "./embedded-agent-messaging.types.js";
 
-type CliUsage = {
+export type CliUsage = {
   input?: number;
   output?: number;
   cacheRead?: number;
   cacheWrite?: number;
   total?: number;
 };
+
+/**
+ * Live prompt-footprint (current context size) for a CLI turn, derived from the
+ * usage components reported on the stream-json `result` event.
+ *
+ * Claude's stream-json result usage does NOT carry a `total_tokens` field — only
+ * `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` and
+ * `output_tokens` — so `toCliUsage(...).total` is almost always undefined on real
+ * Claude CLI turns. The live prompt footprint that determines context pressure is
+ * `input + cacheRead + cacheWrite` (on a resumed session the cache-read component
+ * dominates and holds the bulk of the context, e.g. the ~433k seen in prod).
+ * `output` is the reply, not part of the standing prompt, so it is excluded.
+ *
+ * Prefer an explicit positive `total` when the provider actually supplied one;
+ * otherwise sum the prompt-side components. Returns undefined only when there is
+ * genuinely no usable usage data at all.
+ */
+export function deriveCliUsageFootprint(usage: CliUsage | undefined): number | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const positive = (value: number | undefined): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+  const total = positive(usage.total);
+  if (total !== undefined) {
+    return Math.floor(total);
+  }
+  const input = positive(usage.input) ?? 0;
+  const cacheRead = positive(usage.cacheRead) ?? 0;
+  const cacheWrite = positive(usage.cacheWrite) ?? 0;
+  const footprint = input + cacheRead + cacheWrite;
+  return footprint > 0 ? Math.floor(footprint) : undefined;
+}
 
 type CliProcessDiagnostics = {
   backendId: string;
